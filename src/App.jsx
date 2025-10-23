@@ -1,12 +1,14 @@
 import React from "react";
 
 /* =============================
-   FORTUNEX AI v3a (Engage)
-   - AI Insight (rule-based summary)
-   - Fortune Score (0–100) + sub-scores:
-     • Stability • Growth • Momentum (0–10 bars)
-   - Robust fetch: link, raw address, search
-   - v2 features preserved
+   FORTUNEX AI v3a.1 (Unified Mood)
+   - Robust fetch: link / raw address / search
+   - AI Insight + Fortune Score (0–100)
+   - Sub-scores: Stability / Growth / Momentum (0–10)
+   - Buyer/Seller, Liquidity, Volume, Pair Age, Sparkline
+   - Mood badge & Raw Score color aligned with AI mood
+   - History, Favorites, Copy Summary
+   - Free gate (2/day) + Stripe upgrade modal
 ============================= */
 
 // ---- Stripe Payment Links (replace with your real links) ----
@@ -16,26 +18,25 @@ export const STRIPE_ELITE_LINK = "https://buy.stripe.com/test_ELITE_LINK";
 // ---- Dexscreener helpers ----
 const DS_API = "https://api.dexscreener.com/latest/dex/";
 
-/** Parse user input: full link, raw address, or search */
+/** Parse user input: full Dexscreener link, raw address, or search text */
 function parseDexInput(raw) {
   try {
     const txt = raw.trim();
-    // If looks like a raw address (pair or token), treat as raw
+    // raw pair/token heuristic
     if (/^[0-9a-zA-Z]{32,}$/.test(txt)) return { kind: "raw", id: txt };
 
-    // If it is a URL, try to read it
+    // try as URL
     const url = new URL(txt);
     const host = url.hostname.toLowerCase();
     const parts = url.pathname.split("/").filter(Boolean);
 
     if (host.includes("dexscreener.com") && parts.length >= 2) {
-      // ex: https://dexscreener.com/solana/PAIR
+      // https://dexscreener.com/<chain>/<pair>
       return { kind: "dex", chain: parts[0], id: parts[1] };
     }
-    // Unknown URL → use the whole thing as a search query
     return { kind: "search", q: txt };
   } catch {
-    // Not a URL; fall back to search or raw
+    // not a URL → raw or search
     if (/^[0-9a-zA-Z]{32,}$/.test(raw.trim())) return { kind: "raw", id: raw.trim() };
     return { kind: "search", q: raw.trim() };
   }
@@ -51,7 +52,7 @@ async function fetchDexSmart(parsed) {
   if (parsed?.kind === "raw") {
     tries.push(`${DS_API}tokens/${parsed.id}`);
   }
-  // Always add search fallback (works with address, symbol, or URL text)
+  // Always add search fallback (works for address, symbol, or pasted text)
   tries.push(`${DS_API}search?q=${encodeURIComponent(parsed?.q || parsed?.id || "")}`);
 
   for (const u of tries) {
@@ -88,20 +89,22 @@ function scoreFrom(pair) {
   const change = pair?.priceChange?.h24 ?? 0;
   const base = Math.log10(liq + vol + 1) * 10 + (buys - sells) + change;
   const total = Math.round(clamp(base, 0, 100));
-  const label = total > 66 ? "Bullish" : total < 33 ? "Bearish" : "Neutral";
+  // label no longer used for UI; AI mood is the source of truth
+  const label = total > 50 ? "Bullish" : total < 50 ? "Bearish" : "Neutral";
   return { total, label };
 }
 
-// Sub-scores (0..10) and AI insight (rule-based, local)
+// AI qualities + insight (local rule-based)
 function analyzeQualities(pair) {
   if (!pair) {
     return {
       stability: 5, growth: 5, momentum: 5,
+      fortune: 50, mood: "Neutral", buyerShare: 50,
       insight: "No live data found. Try a full Dexscreener link or a known pair address."
     };
   }
-  const liq = Number(pair?.liquidity?.usd ?? 0);          // higher = stability
-  const vol24 = Number(pair?.volume?.h24 ?? 0);           // demand proxy
+  const liq = Number(pair?.liquidity?.usd ?? 0);
+  const vol24 = Number(pair?.volume?.h24 ?? 0);
   const ch1 = Number(pair?.priceChange?.h1 ?? 0);
   const ch6 = Number(pair?.priceChange?.h6 ?? 0);
   const ch24 = Number(pair?.priceChange?.h24 ?? 0);
@@ -109,37 +112,33 @@ function analyzeQualities(pair) {
   const sells= Number(pair?.txns?.h24?.sells ?? 0);
   const buyerShare = (buys + sells) ? buys / (buys + sells) : 0.5;
 
-  // Stability: liquidity dominates; penalize extreme volatility (|24h change|)
-  let stability = (Math.log10(liq + 1) * 1.6) - (Math.min(Math.abs(ch24), 50) / 25); // ~0..10
+  // 0..10 subs
+  let stability = (Math.log10(liq + 1) * 1.6) - (Math.min(Math.abs(ch24), 50) / 25);
   stability = clamp(stability, 0, 10);
 
-  // Growth: 24h volume + positive price change
-  let growth = (Math.log10(vol24 + 1) * 1.6) + (clamp(ch24, -20, 20) / 10); // ~0..10
+  let growth = (Math.log10(vol24 + 1) * 1.6) + (clamp(ch24, -20, 20) / 10);
   growth = clamp(growth, 0, 10);
 
-  // Momentum: buyer imbalance + recent change (1h/6h weighted)
   const bias = (buyerShare - 0.5) * 20; // -10..+10
   let momentum = 5 + bias * 0.6 + clamp((ch1 + ch6) / 4, -5, 5);
   momentum = clamp(momentum, 0, 10);
 
-  // Fortune Score is weighted from subs + a small liquidity safety bonus
+  // 0..100 fortune
   const fortune = clamp(
-    Math.round((stability * 3 + growth * 3 + momentum * 4) * 2.5), // 0..250 → clamp to 0..100 below
+    Math.round((stability * 3 + growth * 3 + momentum * 4) * 2.5),
     0, 100
   );
 
-  // AI Insight (friendly, short)
-  let mood = fortune > 75 ? "Bullish" : fortune < 35 ? "Bearish" : "Neutral";
-  let reasonBits = [];
-  if (buyerShare > 0.58) reasonBits.push("strong buyer advantage");
-  if (buyerShare < 0.42) reasonBits.push("seller pressure");
-  if (ch24 > 8) reasonBits.push("solid 24h price gain");
-  if (ch24 < -8) reasonBits.push("24h price weakness");
-  if (liq > 500000) reasonBits.push("healthy liquidity");
-  if (vol24 > 300000) reasonBits.push("active trading volume");
-  if (reasonBits.length === 0) reasonBits.push("mixed signals");
+  const mood = fortune > 75 ? "Bullish" : fortune < 35 ? "Bearish" : "Neutral";
 
-  const insight = `${mood} bias — ${reasonBits.slice(0, 3).join(", ")}.`;
+  const reasons = [];
+  if (buyerShare > 0.58) reasons.push("strong buyer advantage");
+  if (buyerShare < 0.42) reasons.push("seller pressure");
+  if (ch24 > 8) reasons.push("solid 24h price gain");
+  if (ch24 < -8) reasons.push("24h price weakness");
+  if (liq > 500000) reasons.push("healthy liquidity");
+  if (vol24 > 300000) reasons.push("active trading volume");
+  if (!reasons.length) reasons.push("mixed signals");
 
   return {
     stability: Math.round(stability * 10) / 10,
@@ -148,11 +147,10 @@ function analyzeQualities(pair) {
     fortune,
     mood,
     buyerShare: Math.round(buyerShare * 1000) / 10,
-    insight
+    insight: `${mood} bias — ${reasons.slice(0, 3).join(", ")}.`
   };
 }
 
-// build a simple sparkline from 1h/6h/24h change
 function buildSparkPoints(pc = {}) {
   const seq = [
     { t: 0, v: 0 },
@@ -165,6 +163,13 @@ function buildSparkPoints(pc = {}) {
   const max = Math.max(...ys);
   const range = max - min || 1;
   return seq.map((p) => ({ x: (p.t / 24) * 100, y: 100 - ((p.v - min) / range) * 100 }));
+}
+
+// Mood color helper (for badge & raw score)
+function moodColor(mood) {
+  if (mood === "Bullish") return "#2ECC71"; // green
+  if (mood === "Bearish") return "#E74C3C"; // red
+  return "#F1C40F";                          // gold (Neutral)
 }
 
 // ---- storage keys ----
@@ -180,30 +185,21 @@ export default function FortunexAIApp() {
   const [loading, setLoading] = React.useState(false);
   const [showUpgrade, setShowUpgrade] = React.useState(false);
   const [isPro, setIsPro] = React.useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem(LSK_PRO) || "false");
-    } catch {
-      return false;
-    }
+    try { return JSON.parse(localStorage.getItem(LSK_PRO) || "false"); }
+    catch { return false; }
   });
   const [history, setHistory] = React.useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem(LSK_HISTORY) || "[]");
-    } catch {
-      return [];
-    }
+    try { return JSON.parse(localStorage.getItem(LSK_HISTORY) || "[]"); }
+    catch { return []; }
   });
   const [favs, setFavs] = React.useState(() => {
-    try {
-      return JSON.parse(localStorage.getItem(LSK_FAVS) || "[]");
-    } catch {
-      return [];
-    }
+    try { return JSON.parse(localStorage.getItem(LSK_FAVS) || "[]"); }
+    catch { return []; }
   });
 
   const FREE_LIMIT = 2;
 
-  // auto-upgrade from Stripe (?pro=1)
+  // Auto-upgrade from Stripe (?pro=1)
   React.useEffect(() => {
     const p = new URLSearchParams(window.location.search);
     if (p.get("pro") === "1") {
@@ -215,11 +211,8 @@ export default function FortunexAIApp() {
   }, []);
 
   const getCount = () => {
-    try {
-      return parseInt(localStorage.getItem(LSK_DAILY()) || "0", 10) || 0;
-    } catch {
-      return 0;
-    }
+    try { return parseInt(localStorage.getItem(LSK_DAILY()) || "0", 10) || 0; }
+    catch { return 0; }
   };
   const incCount = () => {
     const n = getCount() + 1;
@@ -265,7 +258,7 @@ export default function FortunexAIApp() {
         symbol: `${top?.baseToken?.symbol ?? "?"}/${top?.quoteToken?.symbol ?? "?"}`,
         price: Number(top?.priceUsd ?? 0),
         score: baseScore.total,
-        label: baseScore.label,
+        label: qual.mood, // store mood label for history chip
         ts: Date.now(),
         link: `https://dexscreener.com/${top.chainId ?? parsed?.chain}/${top.pairAddress ?? parsed?.id ?? ""}`,
       });
@@ -290,7 +283,10 @@ export default function FortunexAIApp() {
     alert("Summary copied to clipboard.");
   }
 
+  // handy locals for UI
   const p = result?.top;
+  const mood = result?.qual?.mood || result?.score?.label || "Neutral";
+  const moodCol = moodColor(mood);
   const buys = p?.txns?.h24?.buys ?? 0;
   const sells = p?.txns?.h24?.sells ?? 0;
 
@@ -341,23 +337,47 @@ export default function FortunexAIApp() {
         {/* Result Card */}
         {result && result.top && (
           <div style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
-            {/* Header row */}
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              {p?.info?.imageUrl && <img src={p.info.imageUrl} alt="token" width={32} height={32} style={{ borderRadius: 8, background: "#111" }} />}
+            {/* Header row — mood badge & raw score colorized */}
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              {p?.info?.imageUrl && (
+                <img src={p.info.imageUrl} alt="token" width={32} height={32} style={{ borderRadius: 8, background: "#111" }} />
+              )}
+
               <div style={{ fontWeight: 700 }}>
                 {p ? `${p.baseToken?.symbol ?? "?"}/${p.quoteToken?.symbol ?? "?"}` : "—"}
               </div>
-              <span style={{ background: "#D4AF37", color: "#000", fontWeight: 700, fontSize: 12, borderRadius: 8, padding: "2px 8px" }}>
-                {result.score.label}
+
+              <span style={{
+                border: `1px solid ${moodCol}`,
+                color: moodCol,
+                fontWeight: 700,
+                fontSize: 12,
+                borderRadius: 8,
+                padding: "2px 8px",
+              }}>
+                {mood}
               </span>
-              <span style={{ fontSize: 12, color: "#D4AF37cc" }}>Raw Score: {result.score.total}/100</span>
+
+              <span style={{ fontSize: 12, color: moodCol }}>
+                Raw Score: {result.score.total}/100
+              </span>
+
               {p?.pairAddress && (
-                <a href={`https://dexscreener.com/${p.chainId}/${p.pairAddress}`} target="_blank" rel="noreferrer" style={{ marginLeft: "auto", fontSize: 12, color: "#2E86DE" }}>
+                <a
+                  href={`https://dexscreener.com/${p.chainId}/${p.pairAddress}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ marginLeft: "auto", fontSize: 12, color: "#2E86DE" }}
+                >
                   View on Dexscreener ↗
                 </a>
               )}
               {p?.pairAddress && (
-                <button onClick={() => toggleFav(p.pairAddress)} title="Favorite" style={{ marginLeft: 8, background: "transparent", border: "1px solid #D4AF37", color: "#D4AF37", borderRadius: 8, padding: "2px 8px" }}>
+                <button
+                  onClick={() => toggleFav(p.pairAddress)}
+                  title="Favorite"
+                  style={{ marginLeft: 8, background: "transparent", border: "1px solid #D4AF37", color: "#D4AF37", borderRadius: 8, padding: "2px 8px" }}
+                >
                   {favs.includes(p.pairAddress) ? "★" : "☆"}
                 </button>
               )}
@@ -369,7 +389,9 @@ export default function FortunexAIApp() {
                 <span style={{ background: "#D4AF37", color: "#000", fontWeight: 700, borderRadius: 8, padding: "2px 8px" }}>
                   Fortune Score: {result.qual.fortune}/100
                 </span>
-                <span style={{ fontSize: 12, color: "#D4AF37cc" }}>{result.qual.mood} • Buyer Share {result.qual.buyerShare}%</span>
+                <span style={{ fontSize: 12, color: "#D4AF37cc" }}>
+                  {result.qual.mood} • Buyer Share {result.qual.buyerShare}%
+                </span>
               </div>
 
               {/* Sub-score bars */}
@@ -467,7 +489,7 @@ export default function FortunexAIApp() {
             </div>
             <div style={{ textAlign: "center", fontWeight: 700, fontSize: 18 }}>You’ve reached your free limit</div>
             <div style={{ textAlign: "center", opacity: 0.85, fontSize: 14, marginTop: 6 }}>
-              You’ve completed {FREE_LIMIT} analyses today. Upgrade to unlock unlimited insights and advanced learning tools.
+              You’ve completed 2 analyses today. Upgrade to unlock unlimited insights and advanced learning tools.
             </div>
             <ul style={{ marginTop: 8, fontSize: 14, lineHeight: 1.6 }}>
               <li>• Unlimited analyses per day</li>
@@ -505,7 +527,7 @@ function Stat({ label, value }) {
 }
 
 function Bar({ label, value }) {
-  const pct = Math.round((Number(value) / 10) * 100);
+  const p = Math.round((Number(value) / 10) * 100);
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
@@ -513,7 +535,7 @@ function Bar({ label, value }) {
         <span>{Number(value).toFixed(1)}/10</span>
       </div>
       <div style={{ height: 10, background: "#1b1b1b", borderRadius: 8, overflow: "hidden", border: "1px solid #333" }}>
-        <div style={{ width: `${pct}%`, height: "100%", background: "linear-gradient(90deg,#2E86DE,#D4AF37)" }} />
+        <div style={{ width: `${p}%`, height: "100%", background: "linear-gradient(90deg,#2E86DE,#D4AF37)" }} />
       </div>
     </div>
   );
@@ -529,4 +551,4 @@ function Sparkline({ points = [], height = 50 }) {
       <path d={d} fill="none" stroke={stroke} strokeWidth="2" />
     </svg>
   );
-                                  }
+                         }
