@@ -1,33 +1,42 @@
 import React from "react";
 
 /* ============================================
-   FORTUNEX AI v4
-   - Tabs: Analyzer • Top Movers • Favorites
-   - Robust fetch: link / raw address / search
-   - AI Insight + Fortune Score + sub-scores
-   - Sparkline, Liquidity, Volume, Tx, Pair Age
-   - Compare Mode (Pro-gated)
-   - 2/day free gate + Stripe upgrade modal
+   FORTUNEX AI v5.2 — Public Promo + Gift
+   - Pricing tab with promo input (auto-apply on Enter + toast)
+   - Upgrade modal with promo input
+   - Gift Pro modal (shareable ?pro=1 link)
+   - v5 features kept:
+     • Share as Image (watermark)
+     • Export PDF (Pro)
+     • Tabs: Analyzer • Top Movers • Favorites • Pricing
+     • Compare Mode (Pro)
+     • AI Insight + Fortune Score
+     • Robust fetch: link / raw address / search
 ============================================ */
 
 // ---- Stripe Payment Links (replace with your live links) ----
 export const STRIPE_PRO_LINK   = "https://buy.stripe.com/test_PRO_LINK";
 export const STRIPE_ELITE_LINK = "https://buy.stripe.com/test_ELITE_LINK";
 
+// ---- Public promo codes → Stripe discounted links (replace) ----
+const PROMOS = {
+  FORTUNE20: "https://buy.stripe.com/test_DISCOUNT20", // 20% off
+  WELCOME10: "https://buy.stripe.com/test_DISCOUNT10", // 10% off
+  VIPFREE:   "https://buy.stripe.com/test_FREEFIRST",  // free first month
+};
+
 // ---- Dexscreener helpers ----
 const DS_API = "https://api.dexscreener.com/latest/dex/";
 
-/** Parse user input: full Dexscreener link, raw address, or search text */
 function parseDexInput(raw) {
   try {
     const txt = raw.trim();
-    if (/^[0-9a-zA-Z]{32,}$/.test(txt)) return { kind: "raw", id: txt }; // raw pair/token
-
+    if (/^[0-9a-zA-Z]{32,}$/.test(txt)) return { kind: "raw", id: txt };
     const url = new URL(txt);
     const host = url.hostname.toLowerCase();
     const parts = url.pathname.split("/").filter(Boolean);
     if (host.includes("dexscreener.com") && parts.length >= 2) {
-      return { kind: "dex", chain: parts[0], id: parts[1] }; // /chain/pair
+      return { kind: "dex", chain: parts[0], id: parts[1] };
     }
     return { kind: "search", q: txt };
   } catch {
@@ -36,13 +45,11 @@ function parseDexInput(raw) {
   }
 }
 
-/** Try multiple endpoints until one returns pairs */
 async function fetchDexSmart(parsed) {
   const tries = [];
   if (parsed?.kind === "dex")  tries.push(`${DS_API}pairs/${parsed.chain}/${parsed.id}`);
   if (parsed?.kind === "raw")  tries.push(`${DS_API}tokens/${parsed.id}`);
   tries.push(`${DS_API}search?q=${encodeURIComponent(parsed?.q || parsed?.id || "")}`);
-
   for (const u of tries) {
     try {
       const r = await fetch(u, { headers: { Accept: "application/json" } });
@@ -54,20 +61,16 @@ async function fetchDexSmart(parsed) {
   return null;
 }
 
-/** Simple "Top Movers" source (broad search by chain keyword + sort) */
 async function fetchMovers(chain = "solana", sortKey = "pct") {
-  // We use search endpoint (broad) then rank by 24h change or volume.
   const r = await fetch(`${DS_API}search?q=${encodeURIComponent(chain)}`, { headers: { Accept: "application/json" } });
   if (!r.ok) return [];
   const d = await r.json();
   const arr = Array.isArray(d?.pairs) ? d.pairs : [];
-  const minLiq = 20000;             // ignore dust
-  const minVol = 20000;
+  const minLiq = 20000, minVol = 20000;
   const filtered = arr.filter(p => (p?.liquidity?.usd ?? 0) >= minLiq && (p?.volume?.h24 ?? 0) >= minVol);
   if (sortKey === "vol") {
     return filtered.sort((a,b)=> (b.volume?.h24 ?? 0) - (a.volume?.h24 ?? 0)).slice(0, 25);
   }
-  // default: absolute 24h change first, tie-breaker by volume
   return filtered
     .sort((a,b)=>{
       const ap = Math.abs(a?.priceChange?.h24 ?? 0);
@@ -99,11 +102,10 @@ function scoreFrom(pair) {
   const change = pair?.priceChange?.h24 ?? 0;
   const base = Math.log10(liq + vol + 1) * 10 + (buys - sells) + change;
   const total = Math.round(clamp(base, 0, 100));
-  const label = total > 50 ? "Bullish" : total < 50 ? "Bearish" : "Neutral"; // informational only
+  const label = total > 50 ? "Bullish" : total < 50 ? "Bearish" : "Neutral";
   return { total, label };
 }
 
-// AI qualities + insight (local rule-based)
 function analyzeQualities(pair) {
   if (!pair) {
     return {
@@ -181,9 +183,48 @@ const LSK_DAILY = (d = new Date()) =>
 const LSK_HISTORY = "fx_history";
 const LSK_FAVS = "fx_favorites";
 
+// ---- Lazy loaders for html2canvas / jsPDF (NPM or CDN) ----
+async function ensureLibs() {
+  let html2canvas = window.html2canvas;
+  let jsPDFCtor = window.jspdf?.jsPDF;
+
+  try {
+    if (!html2canvas) {
+      const mod = await import(/* @vite-ignore */ "html2canvas").catch(()=>null);
+      html2canvas = mod?.default || mod;
+    }
+  } catch {}
+  try {
+    if (!jsPDFCtor) {
+      const mod = await import(/* @vite-ignore */ "jspdf").catch(()=>null);
+      jsPDFCtor = mod?.jsPDF || mod?.default?.jsPDF;
+    }
+  } catch {}
+
+  async function injectOnce(src, check) {
+    if (check()) return;
+    await new Promise((resolve,reject)=>{
+      const s = document.createElement("script");
+      s.src = src; s.async = true;
+      s.onload = resolve;
+      s.onerror = ()=> reject(new Error("CDN load failed: "+src));
+      document.head.appendChild(s);
+    });
+  }
+  if (!html2canvas) {
+    await injectOnce("https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js", ()=> !!window.html2canvas);
+    html2canvas = window.html2canvas;
+  }
+  if (!jsPDFCtor) {
+    await injectOnce("https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js", ()=> !!window.jspdf?.jsPDF);
+    jsPDFCtor = window.jspdf.jsPDF;
+  }
+  return { html2canvas, jsPDF: jsPDFCtor };
+}
+
 // ---- Main App ----
 export default function FortunexAIApp() {
-  const [tab, setTab] = React.useState("analyze"); // analyze | movers | favs
+  const [tab, setTab] = React.useState("analyze"); // analyze | movers | favs | pricing
 
   const [link, setLink] = React.useState("");
   const [result, setResult] = React.useState(null);
@@ -208,11 +249,18 @@ export default function FortunexAIApp() {
 
   // Movers state
   const [mChain, setMChain] = React.useState("solana");
-  const [mSort, setMSort] = React.useState("pct"); // pct | vol
+  const [mSort, setMSort] = React.useState("pct");
   const [movers, setMovers] = React.useState([]);
   const [mLoading, setMLoading] = React.useState(false);
 
+  // Promo / gift UI
+  const [coupon, setCoupon] = React.useState("");
+  const [couponModal, setCouponModal] = React.useState(false); // reuse upgrade modal
+  const [giftOpen, setGiftOpen] = React.useState(false);
+  const [toast, setToast] = React.useState(null);
+
   const FREE_LIMIT = 2;
+  const cardRef = React.useRef(null);
 
   // Auto-upgrade from Stripe (?pro=1)
   React.useEffect(() => {
@@ -222,6 +270,7 @@ export default function FortunexAIApp() {
       setIsPro(true);
       const url = window.location.origin + window.location.pathname;
       window.history.replaceState({}, "", url);
+      showToast("✅ Pro unlocked on this device");
     }
   }, []);
 
@@ -260,6 +309,28 @@ export default function FortunexAIApp() {
     setHistory(next);
     localStorage.setItem(LSK_HISTORY, JSON.stringify(next));
   }
+
+  function showToast(msg, ms = 1800) {
+    setToast(msg);
+    setTimeout(() => setToast(null), ms);
+  }
+
+  function applyPromo(codeRaw) {
+    const code = (codeRaw || "").trim().toUpperCase();
+    if (!code) return;
+    const link = PROMOS[code];
+    if (link) {
+      showToast(`✅ ${code} applied — redirecting…`);
+      setTimeout(() => { window.location.href = link; }, 500);
+    } else {
+      showToast("❌ Invalid code");
+    }
+  }
+
+  const giftLink = React.useMemo(() => {
+    const base = window.location.origin + window.location.pathname;
+    return `${base}?pro=1`;
+  }, []);
 
   async function analyze() {
     if (!isPro && getCount() >= FREE_LIMIT) { setShowUpgrade(true); return; }
@@ -313,9 +384,96 @@ export default function FortunexAIApp() {
       `Insight: ${result.qual.insight}`,
       `Pair: ${p.pairAddress ?? "—"} on ${p.chainId ?? "—"}`,
       `Note: Educational only — not financial advice.`,
+      `Generated by Fortunex AI — fortunex.app`,
     ].join("\n");
     navigator.clipboard?.writeText(s);
-    alert("Summary copied to clipboard.");
+    showToast("📋 Summary copied");
+  }
+
+  // ---- Share as Image (PNG) with watermark ----
+  async function shareImage() {
+    if (!result?.top || !cardRef.current) return;
+    const { html2canvas } = await ensureLibs();
+    const node = cardRef.current;
+
+    const canvas = await html2canvas(node, { backgroundColor: "#0A1A2F" });
+    const ctx = canvas.getContext("2d");
+
+    const barH = Math.max(36, Math.round(canvas.height * 0.05));
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, canvas.height - barH, canvas.width, barH);
+
+    const r = Math.min(18, Math.round(barH * 0.4));
+    ctx.beginPath();
+    ctx.arc(20 + r, canvas.height - barH/2, r, 0, Math.PI * 2);
+    ctx.fillStyle = "#D4AF37"; ctx.fill();
+    ctx.fillStyle = "#000";
+    ctx.font = `${Math.round(r*1.2)}px Inter, Arial`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("F", 20 + r, canvas.height - barH/2 + 1);
+
+    ctx.fillStyle = "#FFFFFF";
+    ctx.font = `bold ${Math.max(12, Math.round(barH*0.4))}px Inter, Arial`;
+    ctx.textAlign = "left";
+    ctx.fillText("Generated by Fortunex AI — Educational use only • fortunex.app", 20 + r*2 + 16, canvas.height - barH/2 + 1);
+
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/png", 0.95));
+    const file = new File([blob], "fortunex-analysis.png", { type: "image/png" });
+
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({
+          title: "Fortunex AI Analysis",
+          text: "Generated by Fortunex AI — Educational use only.",
+          files: [file],
+        });
+        return;
+      } catch {}
+    }
+
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "fortunex-analysis.png";
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    showToast("📸 Image saved");
+  }
+
+  // ---- Export PDF (Pro) ----
+  async function sharePDF() {
+    if (!isPro) { setShowUpgrade(true); return; }
+    if (!result?.top || !cardRef.current) return;
+
+    const { html2canvas, jsPDF } = await ensureLibs();
+    const node = cardRef.current;
+    const canvas = await html2canvas(node, { backgroundColor: "#0A1A2F" });
+    const imgData = canvas.toDataURL("image/png");
+
+    const pdf = new jsPDF({ unit: "pt", format: "a4", compress: true });
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const margin = 24;
+
+    pdf.setFont("helvetica", "bold");
+    pdf.setFontSize(16);
+    pdf.text("Fortunex AI — Educational Analysis Report", margin, 40);
+
+    pdf.setFont("helvetica", "normal");
+    pdf.setFontSize(11);
+    pdf.text(`Generated: ${new Date().toLocaleString()}`, margin, 58);
+
+    const imgW = pageW - margin*2;
+    const ratio = canvas.height / canvas.width;
+    const imgH = Math.min(pageH - 160, imgW * ratio);
+    pdf.addImage(imgData, "PNG", margin, 80, imgW, imgH, "", "FAST");
+
+    const yFooter = pageH - 36;
+    pdf.setFillColor(0,0,0); pdf.rect(margin, yFooter - 20, pageW - margin*2, 26, "F");
+    pdf.setTextColor(255,255,255); pdf.setFont("helvetica", "bold");
+    pdf.text("Generated by Fortunex AI — Educational use only • fortunex.app", margin + 12, yFooter);
+
+    pdf.save("fortunex-report.pdf");
+    showToast("📄 PDF saved");
   }
 
   const p = result?.top;
@@ -326,9 +484,18 @@ export default function FortunexAIApp() {
 
   return (
     <div style={{ minHeight: "100vh", background: "linear-gradient(#0A1A2F,#111)", color: "#fff", fontFamily: "Inter,system-ui,Arial", paddingBottom: 40 }}>
+      {/* Toast */}
+      {toast && (
+        <div style={{
+          position:"fixed", top:16, left:"50%", transform:"translateX(-50%)",
+          background:"#0A1A2F", border:"1px solid #D4AF37", color:"#fff",
+          padding:"8px 12px", borderRadius:12, zIndex:100
+        }}>{toast}</div>
+      )}
+
       {/* Header */}
       <header style={{ position: "sticky", top: 0, backdropFilter: "blur(4px)", borderBottom: "1px solid #D4AF37", background: "#0A1A2Fcc", zIndex: 10 }}>
-        <div style={{ maxWidth: 980, margin: "0 auto", padding: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ maxWidth: 1024, margin: "0 auto", padding: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ width: 40, height: 40, borderRadius: 20, background: "linear-gradient(135deg,#D4AF37,#2E86DE)", display: "grid", placeItems: "center", color: "#000", fontWeight: 800 }}>F</div>
             <div>
@@ -336,31 +503,38 @@ export default function FortunexAIApp() {
               <div style={{ fontSize: 12, color: "#D4AF37" }}>Token Intelligence Dashboard</div>
             </div>
           </div>
-          <a href="#" onClick={(e) => { e.preventDefault(); setShowUpgrade(true); }} style={{ fontSize: 12, color: "#D4AF37", textDecoration: "underline" }}>Pricing</a>
+          <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+            <a href="#" onClick={(e) => { e.preventDefault(); setGiftOpen(true); }} style={{ fontSize: 12, color: "#2E86DE", textDecoration: "underline" }}>🎁 Gift Pro</a>
+            <a href="#" onClick={(e) => { e.preventDefault(); setShowUpgrade(true); }} style={{ fontSize: 12, color: "#D4AF37", textDecoration: "underline" }}>Upgrade</a>
+          </div>
         </div>
         {/* Tabs */}
-        <div style={{ maxWidth: 980, margin: "0 auto", padding: "8px 12px", display: "flex", gap: 8 }}>
-          {["analyze","movers","favs"].map(t => (
-            <button key={t} onClick={()=>setTab(t)}
+        <div style={{ maxWidth: 1024, margin: "0 auto", padding: "8px 12px", display: "flex", gap: 8, flexWrap:"wrap" }}>
+          {[
+            ["analyze","Analyzer"],
+            ["movers","Top Movers"],
+            ["favs","Favorites"],
+            ["pricing","Pricing"],
+          ].map(([key,label]) => (
+            <button key={key} onClick={()=>setTab(key)}
               style={{
-                background: tab===t ? "#162844" : "transparent",
+                background: tab===key ? "#162844" : "transparent",
                 border: "1px solid #2a3b5a",
                 color: "#fff",
                 borderRadius: 12, padding: "8px 12px", fontWeight: 600
               }}>
-              {t==="analyze"?"Analyzer":t==="movers"?"Top Movers":"Favorites"}
+              {label}
             </button>
           ))}
         </div>
       </header>
 
       {/* Main */}
-      <main style={{ maxWidth: 980, margin: "0 auto", padding: 12, display: "grid", gap: 12 }}>
+      <main style={{ maxWidth: 1024, margin: "0 auto", padding: 12, display: "grid", gap: 12 }}>
 
         {/* ----- ANALYZER TAB ----- */}
         {tab==="analyze" && (
           <>
-            {/* Input Card */}
             <div style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
               <div style={{ fontSize: 14, marginBottom: 8 }}>Paste DEX link / address / name</div>
               <input
@@ -381,17 +555,14 @@ export default function FortunexAIApp() {
               </div>
             </div>
 
-            {/* No data */}
             {result && !result.top && (
               <div style={{ background: "#311", border: "1px solid #a33", borderRadius: 12, padding: 12 }}>
                 Couldn’t find live data for that input. Try a full Dexscreener link, a raw pair/token address, or a token name.
               </div>
             )}
 
-            {/* Result Card */}
             {result && result.top && (
-              <div style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
-                {/* Header row */}
+              <div ref={cardRef} style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                   {p?.info?.imageUrl && <img src={p.info.imageUrl} alt="token" width={32} height={32} style={{ borderRadius: 8, background: "#111" }} />}
                   <div style={{ fontWeight: 700 }}>
@@ -412,7 +583,6 @@ export default function FortunexAIApp() {
                   )}
                 </div>
 
-                {/* AI Insight + Fortune */}
                 <div style={{ marginTop: 12, background: "#111", border: "1px solid #222", borderRadius: 12, padding: 12 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ background: "#D4AF37", color: "#000", fontWeight: 700, borderRadius: 8, padding: "2px 8px" }}>
@@ -432,7 +602,6 @@ export default function FortunexAIApp() {
                   </div>
                 </div>
 
-                {/* Sparkline */}
                 <div style={{ marginTop: 12 }}>
                   <Sparkline points={buildSparkPoints(p?.priceChange)} height={50} />
                   <div style={{ fontSize: 12, color: "#D4AF37aa", marginTop: 4 }}>
@@ -440,7 +609,6 @@ export default function FortunexAIApp() {
                   </div>
                 </div>
 
-                {/* Stats */}
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8, marginTop: 12 }}>
                   <Stat label="Price" value={`$${Number(p?.priceUsd ?? 0).toFixed(6)}`} />
                   <Stat label="Liquidity" value={`$${k(p?.liquidity?.usd)}`} />
@@ -449,12 +617,14 @@ export default function FortunexAIApp() {
                   <Stat label="Pair Age" value={fmtDate(p?.pairCreatedAt)} />
                 </div>
 
-                {/* Actions */}
                 <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                   <button onClick={copySummary} style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #D4AF37", color: "#D4AF37", background: "transparent" }}>
                     Copy summary
                   </button>
-                  <button onClick={() => setShowUpgrade(true)} style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #2E86DE", color: "#2E86DE", background: "transparent" }}>
+                  <button onClick={shareImage} style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #D4AF37", color: "#D4AF37", background: "transparent" }}>
+                    Share as Image
+                  </button>
+                  <button onClick={sharePDF} style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #2E86DE", color: "#2E86DE", background: "transparent" }}>
                     Export PDF (Pro)
                   </button>
                 </div>
@@ -589,9 +759,102 @@ export default function FortunexAIApp() {
             )}
           </div>
         )}
+
+        {/* ----- PRICING TAB ----- */}
+        {tab==="pricing" && (
+          <div style={{ display:"grid", gap:16 }}>
+            <div style={{ background:"#0A1A2F", border:"1px solid #D4AF3755", borderRadius:16, padding:16, textAlign:"center" }}>
+              <div style={{ fontSize:22, fontWeight:800, letterSpacing:.5 }}>Choose your plan</div>
+              <div style={{ marginTop:6, color:"#D4AF37aa" }}>Start free. Upgrade anytime. Educational use only.</div>
+              <div style={{ marginTop:8, color:"#2ECC71", fontSize:13 }}>
+                Use code <b>FORTUNE20</b> for 20% off — press <b>Enter</b> to apply
+              </div>
+              <div style={{ marginTop:8, display:"flex", gap:8, justifyContent:"center" }}>
+                <input
+                  value={coupon}
+                  onChange={(e)=>setCoupon(e.target.value)}
+                  onKeyDown={(e)=>{ if (e.key === "Enter") applyPromo(coupon); }}
+                  placeholder="Enter promo code (e.g., FORTUNE20)"
+                  style={{ width:260, background:"#111", border:"1px solid #2a3b5a", color:"#fff", borderRadius:8, padding:"8px 10px", textAlign:"center" }}
+                />
+              </div>
+            </div>
+
+            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))", gap:12 }}>
+              {/* Free */}
+              <div style={{ background:"#0A1A2F", border:"1px solid #2a3b5a", borderRadius:16, padding:16 }}>
+                <div style={{ fontWeight:800, fontSize:18 }}>Free</div>
+                <div style={{ fontSize:12, color:"#D4AF37aa" }}>Great for getting started</div>
+                <div style={{ fontSize:24, fontWeight:800, margin:"8px 0" }}>€0<span style={{ fontSize:12, opacity:.8 }}>/mo</span></div>
+                <ul style={{ lineHeight:1.8, fontSize:14, marginTop:6 }}>
+                  <li>• 2 analyses / day</li>
+                  <li>• AI Insight + Fortune Score</li>
+                  <li>• Top Movers (basic)</li>
+                  <li>• Share as Image</li>
+                </ul>
+                <button onClick={()=>setTab("analyze")} style={{ marginTop:12, width:"100%", border:"1px solid #D4AF37", color:"#D4AF37", background:"transparent", borderRadius:12, padding:"10px 12px", fontWeight:700 }}>
+                  Continue Free
+                </button>
+              </div>
+
+              {/* Pro */}
+              <div style={{ background:"#0A1A2F", border:"1px solid #D4AF37", borderRadius:16, padding:16, position:"relative" }}>
+                <span style={{ position:"absolute", top:12, right:12, background:"#D4AF37", color:"#000", fontWeight:800, fontSize:12, borderRadius:999, padding:"4px 8px" }}>POPULAR</span>
+                <div style={{ fontWeight:800, fontSize:18 }}>Pro</div>
+                <div style={{ fontSize:12, color:"#D4AF37aa" }}>For active learners & creators</div>
+                <div style={{ fontSize:24, fontWeight:800, margin:"8px 0" }}>€4.99<span style={{ fontSize:12, opacity:.8 }}>/mo</span></div>
+                <ul style={{ lineHeight:1.8, fontSize:14, marginTop:6 }}>
+                  <li>• Unlimited analyses</li>
+                  <li>• ⚖️ Compare Mode</li>
+                  <li>• 📄 PDF Export (watermarked)</li>
+                  <li>• Enhanced Top Movers</li>
+                  <li>• Priority features</li>
+                </ul>
+                <a href={STRIPE_PRO_LINK} style={{ display:"block", textAlign:"center", marginTop:12, border:"none", background:"linear-gradient(90deg,#D4AF37,#2E86DE)", color:"#000", borderRadius:12, padding:"10px 12px", fontWeight:800, textDecoration:"none" }}>
+                  Upgrade — €4.99/mo
+                </a>
+                <div style={{ textAlign:"center", marginTop:8 }}>
+                  <a href="#" onClick={(e)=>{ e.preventDefault(); setGiftOpen(true); }} style={{ color:"#2E86DE", fontSize:12, textDecoration:"underline" }}>
+                    🎁 Gift Pro access to a friend
+                  </a>
+                </div>
+              </div>
+
+              {/* Elite */}
+              <div style={{ background:"#0A1A2F", border:"1px solid #2a3b5a", borderRadius:16, padding:16 }}>
+                <div style={{ fontWeight:800, fontSize:18 }}>Elite</div>
+                <div style={{ fontSize:12, color:"#D4AF37aa" }}>Coming soon</div>
+                <div style={{ fontSize:24, fontWeight:800, margin:"8px 0" }}>TBA</div>
+                <ul style={{ lineHeight:1.8, fontSize:14, marginTop:6, opacity:.7 }}>
+                  <li>• Alerts & watchlists</li>
+                  <li>• Deeper analytics</li>
+                  <li>• Early feature access</li>
+                </ul>
+                <a href={STRIPE_ELITE_LINK} style={{ display:"block", textAlign:"center", marginTop:12, border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:12, padding:"10px 12px", fontWeight:700, textDecoration:"none" }}>
+                  Join waitlist
+                </a>
+              </div>
+            </div>
+
+            <div style={{ background:"#0A1A2F", border:"1px solid #2a3b5a", borderRadius:16, padding:16 }}>
+              <div style={{ fontWeight:800, fontSize:18, marginBottom:8 }}>FAQ</div>
+              <div style={{ display:"grid", gap:10 }}>
+                <QA q="Is this financial advice?" a="No. Fortunex AI is for educational purposes only. It summarizes on-chain market data to help you learn. Always do your own research." />
+                <QA q="What blockchains are supported?" a="We use Dexscreener data — if a pair is listed there, you can analyze it. Start by pasting a full Dexscreener link or pair address." />
+                <QA q="How do I unlock Pro?" a="Tap Upgrade or apply a promo code and complete checkout. After payment, your device can auto-unlock via ?pro=1 during testing (or with webhooks later)." />
+                <QA q="Can I cancel anytime?" a="Yes. You control your subscription via Stripe; cancel with one click." />
+                <QA q="Can I gift Pro?" a="Yes. Use the Gift Pro link to share a one-time unlock link (?pro=1) for now. You can switch to license keys or Stripe coupons later." />
+              </div>
+            </div>
+
+            <div style={{ textAlign:"center", color:"#D4AF37aa", fontSize:12 }}>
+              7-day money-back guarantee. Educational purpose only — Not financial advice.
+            </div>
+          </div>
+        )}
       </main>
 
-      {/* Upgrade Modal */}
+      {/* Upgrade Modal (with promo input) */}
       {showUpgrade && (
         <div style={{ position:"fixed", inset:0, display:"grid", placeItems:"center", background:"rgba(0,0,0,.6)", backdropFilter:"blur(2px)" }}>
           <div style={{ width:"92%", maxWidth:420, background:"#0A1A2F", border:"1px solid #D4AF37", borderRadius:16, padding:16 }}>
@@ -600,23 +863,54 @@ export default function FortunexAIApp() {
             </div>
             <div style={{ textAlign:"center", fontWeight:700, fontSize:18 }}>Unlock Pro Features</div>
             <div style={{ textAlign:"center", opacity:.85, fontSize:14, marginTop:6 }}>
-              Unlimited analyses, Compare Mode, and shareable reports.
+              Unlimited analyses, Compare Mode, and shareable PDF reports.
             </div>
             <ul style={{ marginTop:8, fontSize:14, lineHeight:1.6 }}>
               <li>• Unlimited daily analyses</li>
               <li>• ⚖️ Compare mode</li>
-              <li>• 🧠 Deeper insights & PDF (coming)</li>
+              <li>• 📄 PDF reports</li>
             </ul>
             <div style={{ display:"grid", gap:8, marginTop:12 }}>
               <a href={STRIPE_PRO_LINK} style={{ textAlign:"center", borderRadius:12, padding:"10px 12px", fontWeight:700, background:"linear-gradient(90deg,#D4AF37,#2E86DE)", color:"#000" }}>
                 🔓 Upgrade Now — €4.99/mo
               </a>
+              <input
+                value={coupon}
+                onChange={(e)=>setCoupon(e.target.value)}
+                onKeyDown={(e)=>{ if (e.key === "Enter") applyPromo(coupon); }}
+                placeholder="Have a promo code? Type and press Enter"
+                style={{ width:"100%", background:"#111", border:"1px solid #2a3b5a", color:"#fff", borderRadius:8, padding:"8px 10px" }}
+              />
               <button onClick={()=>setShowUpgrade(false)} style={{ textAlign:"center", borderRadius:12, padding:"10px 12px", fontWeight:700, border:"1px solid #D4AF3788", color:"#D4AF37", background:"transparent" }}>
                 Maybe later
               </button>
             </div>
             <div style={{ textAlign:"center", marginTop:6, fontSize:12, color:"#D4AF37aa" }}>
               Educational purpose only — Not financial advice.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Gift Pro Modal */}
+      {giftOpen && (
+        <div style={{ position:"fixed", inset:0, display:"grid", placeItems:"center", background:"rgba(0,0,0,.6)" }}>
+          <div style={{ width:"92%", maxWidth:460, background:"#0A1A2F", border:"1px solid #2E86DE", borderRadius:16, padding:16 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div style={{ fontWeight:800 }}>🎁 Gift Pro Access</div>
+              <button onClick={()=>setGiftOpen(false)} style={{ background:"transparent", border:"1px solid #444", color:"#fff", borderRadius:8, padding:"4px 8px" }}>Close</button>
+            </div>
+            <div style={{ marginTop:8, color:"#D4AF37aa", fontSize:14 }}>
+              Share this link with a friend. When they open it, their device will unlock Pro:
+            </div>
+            <div style={{ display:"flex", gap:8, marginTop:10, flexWrap:"wrap" }}>
+              <input value={giftLink} readOnly style={{ flex:1, minWidth:240, background:"#111", border:"1px solid #2E86DE55", color:"#fff", borderRadius:8, padding:"8px 10px" }} />
+              <button onClick={()=>{ navigator.clipboard?.writeText(giftLink); showToast("🔗 Gift link copied"); }} style={{ border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:8, padding:"8px 12px" }}>
+                Copy
+              </button>
+            </div>
+            <div style={{ marginTop:10, fontSize:12, color:"#D4AF37aa" }}>
+              Tip: You can later replace this with license keys or Stripe-issued gift codes.
             </div>
           </div>
         </div>
@@ -663,6 +957,14 @@ function Sparkline({ points = [], height = 50 }) {
     </svg>
   );
 }
+function QA({ q, a }) {
+  return (
+    <div style={{ border:"1px solid #2a3b5a", borderRadius:12, padding:12 }}>
+      <div style={{ fontWeight:700 }}>{q}</div>
+      <div style={{ marginTop:4, color:"#D4AF37aa", fontSize:14 }}>{a}</div>
+    </div>
+  );
+}
 
 /* ---------- Compare UI ---------- */
 function CompareCard({ title, data }) {
@@ -691,7 +993,6 @@ function CompareCard({ title, data }) {
     </div>
   );
 }
-
 function CompareTable({ a, b }) {
   const rows = [
     ["Fortune", a.qual.fortune, b.qual.fortune, v=>v],
