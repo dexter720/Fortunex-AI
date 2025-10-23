@@ -1,45 +1,74 @@
 import React from "react";
 
-/* FORTUNEX AI v2 (compact)
-   - 2/day free gate
-   - Buyer/Seller ratio, Liquidity, Volume
+/* =============================
+   FORTUNEX AI v2 (robust fetch)
+   - Accepts: full Dexscreener link, raw pair/token address, or search text
+   - 2 free analyses/day gate
+   - Buyer/Seller ratio, Liquidity, Volume, Pair Age
    - Sparkline (from h1/h6/h24)
    - History + Favorites (localStorage)
    - Copy summary
-*/
+   ============================= */
 
-export const STRIPE_PRO_LINK = "https://buy.stripe.com/test_PRO_LINK";
+// ---- Stripe Payment Links (replace with your real links) ----
+export const STRIPE_PRO_LINK   = "https://buy.stripe.com/test_PRO_LINK";
 export const STRIPE_ELITE_LINK = "https://buy.stripe.com/test_ELITE_LINK";
 
-// ---------- Dexscreener helpers ----------
+// ---- Dexscreener helpers ----
 const DS_API = "https://api.dexscreener.com/latest/dex/";
-function parseDexLink(raw) {
+
+/** Parse user input: full link, raw address, or search */
+function parseDexInput(raw) {
   try {
-    const u = new URL(raw.trim());
-    const host = u.hostname.toLowerCase();
-    const parts = u.pathname.split("/").filter(Boolean);
+    const txt = raw.trim();
+    // If looks like a raw address (pair or token), treat as raw
+    if (/^[0-9a-zA-Z]{32,}$/.test(txt)) return { kind: "raw", id: txt };
+
+    // If it is a URL, try to read it
+    const url = new URL(txt);
+    const host = url.hostname.toLowerCase();
+    const parts = url.pathname.split("/").filter(Boolean);
+
     if (host.includes("dexscreener.com") && parts.length >= 2) {
-      return { provider: "dexscreener", chain: parts[0], id: parts[1] };
+      // ex: https://dexscreener.com/solana/PAIR
+      return { kind: "dex", chain: parts[0], id: parts[1] };
     }
-    return { provider: "unknown", id: raw };
+    // Unknown URL → use the whole thing as a search query
+    return { kind: "search", q: txt };
   } catch {
-    return null;
+    // Not a URL; fall back to search or raw
+    if (/^[0-9a-zA-Z]{32,}$/.test(raw.trim())) return { kind: "raw", id: raw.trim() };
+    return { kind: "search", q: raw.trim() };
   }
 }
-async function fetchDexscreener(chain, id) {
-  const urls = [`${DS_API}pairs/${chain}/${id}`, `${DS_API}tokens/${id}`];
-  for (const url of urls) {
+
+/** Try multiple endpoints until one returns pairs */
+async function fetchDexSmart(parsed) {
+  const tries = [];
+
+  if (parsed?.kind === "dex") {
+    tries.push(`${DS_API}pairs/${parsed.chain}/${parsed.id}`);
+  }
+  if (parsed?.kind === "raw") {
+    tries.push(`${DS_API}tokens/${parsed.id}`);
+  }
+  // Always add search fallback (works with address, symbol, or URL text)
+  tries.push(`${DS_API}search?q=${encodeURIComponent(parsed?.q || parsed?.id || "")}`);
+
+  for (const u of tries) {
     try {
-      const r = await fetch(url);
+      const r = await fetch(u, { headers: { Accept: "application/json" } });
       if (!r.ok) continue;
       const d = await r.json();
       if (d?.pairs?.length) return d;
-    } catch {}
+    } catch {
+      // ignore and continue
+    }
   }
   return null;
 }
 
-// ---------- utils ----------
+// ---- utils ----
 const k = (n = 0, d = 2) => {
   const x = Number(n) || 0;
   if (Math.abs(x) >= 1e9) return (x / 1e9).toFixed(d) + "B";
@@ -47,7 +76,7 @@ const k = (n = 0, d = 2) => {
   if (Math.abs(x) >= 1e3) return (x / 1e3).toFixed(d) + "k";
   return x.toFixed(d);
 };
-const pct = (n) => (n == null ? "—" : `${Number(n).toFixed(2)}%`);
+const pct = (num) => (num == null ? "—" : `${Number(num).toFixed(2)}%`);
 const fmtDate = (ms) => (ms ? new Date(ms).toLocaleDateString() : "—");
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 
@@ -57,13 +86,15 @@ function scoreFrom(pair) {
   const vol = pair?.volume?.h24 ?? 0;
   const buys = pair?.txns?.h24?.buys ?? 0;
   const sells = pair?.txns?.h24?.sells ?? 0;
-  const ch = pair?.priceChange?.h24 ?? 0;
-  const base = Math.log10(liq + vol + 1) * 10 + (buys - sells) + ch;
+  const change = pair?.priceChange?.h24 ?? 0;
+  const base = Math.log10(liq + vol + 1) * 10 + (buys - sells) + change;
   const total = Math.round(clamp(base, 0, 100));
   const label = total > 66 ? "Bullish" : total < 33 ? "Bearish" : "Neutral";
   return { total, label };
 }
-function sparkPoints(pc = {}) {
+
+// build a simple sparkline from 1h/6h/24h change
+function buildSparkPoints(pc = {}) {
   const seq = [
     { t: 0, v: 0 },
     { t: 1, v: Number(pc.h1 ?? 0) },
@@ -77,14 +108,13 @@ function sparkPoints(pc = {}) {
   return seq.map((p) => ({ x: (p.t / 24) * 100, y: 100 - ((p.v - min) / range) * 100 }));
 }
 
-// ---------- storage keys ----------
+// ---- storage keys ----
 const LSK_PRO = "fx_isPro";
 const LSK_DAILY = (d = new Date()) =>
   `fx_daily_${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
 const LSK_HISTORY = "fx_history";
 const LSK_FAVS = "fx_favorites";
 
-// ---------- App ----------
 export default function FortunexAIApp() {
   const [link, setLink] = React.useState("");
   const [result, setResult] = React.useState(null);
@@ -114,6 +144,7 @@ export default function FortunexAIApp() {
 
   const FREE_LIMIT = 2;
 
+  // auto-upgrade from Stripe (?pro=1)
   React.useEffect(() => {
     const p = new URLSearchParams(window.location.search);
     if (p.get("pro") === "1") {
@@ -156,17 +187,14 @@ export default function FortunexAIApp() {
     setLoading(true);
     setResult(null);
 
-    const parsed = parseDexLink(link);
-    let data = null;
-    if (parsed?.provider === "dexscreener") {
-      data = await fetchDexscreener(parsed.chain, parsed.id);
-    }
-
+    const parsed = parseDexInput(link);
+    const data = await fetchDexSmart(parsed);
     const top = data?.pairs?.[0] ?? null;
     const score = scoreFrom(top);
     const res = { parsed, top, score };
     setResult(res);
     setLoading(false);
+
     if (!isPro) incCount();
 
     if (top) {
@@ -199,7 +227,7 @@ export default function FortunexAIApp() {
   }
 
   const p = result?.top;
-  const spark = sparkPoints(p?.priceChange);
+  const spark = buildSparkPoints(p?.priceChange);
   const buys = p?.txns?.h24?.buys ?? 0;
   const sells = p?.txns?.h24?.sells ?? 0;
   const totalTx = buys + sells || 1;
@@ -225,8 +253,13 @@ export default function FortunexAIApp() {
       <main style={{ maxWidth: 900, margin: "0 auto", padding: 12, display: "grid", gap: 12 }}>
         {/* Input Card */}
         <div style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
-          <div style={{ fontSize: 14, marginBottom: 8 }}>Paste DEX link</div>
-          <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://dexscreener.com/solana/PAIR..." style={{ width: "100%", background: "#111", border: "1px solid #D4AF3722", color: "#fff", borderRadius: 12, padding: "10px 12px" }} />
+          <div style={{ fontSize: 14, marginBottom: 8 }}>Paste DEX link / address / name</div>
+          <input
+            value={link}
+            onChange={(e) => setLink(e.target.value)}
+            placeholder="e.g., https://dexscreener.com/solana/PAIR  or  7xKXJ8K...  or  BONK"
+            style={{ width: "100%", background: "#111", border: "1px solid #D4AF3722", color: "#fff", borderRadius: 12, padding: "10px 12px" }}
+          />
           <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12 }}>
             <button onClick={analyze} disabled={loading} style={{ background: "linear-gradient(90deg,#D4AF37,#2E86DE)", color: "#000", fontWeight: 700, border: "none", padding: "10px 16px", borderRadius: 12 }}>
               {loading ? "Analyzing..." : "Analyze"}
@@ -235,13 +268,27 @@ export default function FortunexAIApp() {
           </div>
         </div>
 
+        {/* No data message */}
+        {result && !result.top && (
+          <div style={{ background: "#311", border: "1px solid #a33", borderRadius: 12, padding: 12 }}>
+            Couldn’t find live data for that input. Try a full Dexscreener link like{" "}
+            <code>https://dexscreener.com/solana/&lt;pair&gt;</code>, a raw pair/token address, or a token name.
+            (Very new/illiquid pairs may not have stats yet.)
+          </div>
+        )}
+
         {/* Result Card */}
-        {result && (
+        {result && result.top && (
           <div style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
+            {/* Header row */}
             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
               {p?.info?.imageUrl && <img src={p.info.imageUrl} alt="token" width={32} height={32} style={{ borderRadius: 8, background: "#111" }} />}
-              <div style={{ fontWeight: 700 }}>{p ? `${p.baseToken?.symbol ?? "?"}/${p.quoteToken?.symbol ?? "?"}` : "—"}</div>
-              <span style={{ background: "#D4AF37", color: "#000", fontWeight: 700, fontSize: 12, borderRadius: 8, padding: "2px 8px" }}>{result.score.label}</span>
+              <div style={{ fontWeight: 700 }}>
+                {p ? `${p.baseToken?.symbol ?? "?"}/${p.quoteToken?.symbol ?? "?"}` : "—"}
+              </div>
+              <span style={{ background: "#D4AF37", color: "#000", fontWeight: 700, fontSize: 12, borderRadius: 8, padding: "2px 8px" }}>
+                {result.score.label}
+              </span>
               <span style={{ fontSize: 12, color: "#D4AF37cc" }}>Score: {result.score.total}/100</span>
               {p?.pairAddress && (
                 <a href={`https://dexscreener.com/${p.chainId}/${p.pairAddress}`} target="_blank" rel="noreferrer" style={{ marginLeft: "auto", fontSize: 12, color: "#2E86DE" }}>
@@ -257,19 +304,19 @@ export default function FortunexAIApp() {
 
             {/* Sparkline */}
             <div style={{ marginTop: 10 }}>
-              <Sparkline points={spark} height={50} />
+              <Sparkline points={buildSparkPoints(p?.priceChange)} height={50} />
               <div style={{ fontSize: 12, color: "#D4AF37aa", marginTop: 4 }}>
                 1h: {pct(p?.priceChange?.h1)} • 6h: {pct(p?.priceChange?.h6)} • 24h: {pct(p?.priceChange?.h24)}
               </div>
             </div>
 
-            {/* Stats */}
+            {/* Stats grid */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8, marginTop: 12, fontSize: 14 }}>
               <Stat label="Price" value={`$${Number(p?.priceUsd ?? 0).toFixed(6)}`} />
               <Stat label="Liquidity" value={`$${k(p?.liquidity?.usd)}`} />
               <Stat label="Vol 24h" value={`$${k(p?.volume?.h24)}`} />
               <Stat label="Tx 24h" value={`${buys} buys / ${sells} sells`} />
-              <Stat label="Buyer Share" value={`${buyerShare.toFixed(1)}%`} />
+              <Stat label="Buyer Share" value={`${(buyerShare).toFixed(1)}%`} />
               <Stat label="Pair Age" value={fmtDate(p?.pairCreatedAt)} />
             </div>
 
@@ -298,11 +345,17 @@ export default function FortunexAIApp() {
                 <div style={{ display: "grid", gap: 8 }}>
                   {history.map((h, i) => (
                     <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 14 }}>
-                      <span style={{ width: 64, opacity: 0.8 }}>{new Date(h.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+                      <span style={{ width: 64, opacity: 0.8 }}>
+                        {new Date(h.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      </span>
                       <span style={{ flex: 1 }}>{h.symbol}</span>
                       <span style={{ opacity: 0.8 }}>${Number(h.price).toFixed(6)}</span>
-                      <span style={{ background: "#222", border: "1px solid #444", borderRadius: 8, padding: "2px 8px" }}>{h.label} {h.score}/100</span>
-                      <a href={h.link} target="_blank" rel="noreferrer" style={{ color: "#2E86DE" }}>Open ↗</a>
+                      <span style={{ background: "#222", border: "1px solid #444", borderRadius: 8, padding: "2px 8px" }}>
+                        {h.label} {h.score}/100
+                      </span>
+                      <a href={h.link} target="_blank" rel="noreferrer" style={{ color: "#2E86DE" }}>
+                        Open ↗
+                      </a>
                     </div>
                   ))}
                 </div>
@@ -360,7 +413,7 @@ export default function FortunexAIApp() {
   );
 }
 
-// ---------- small UI helpers ----------
+/* ---------- Small UI helpers ---------- */
 function Stat({ label, value }) {
   return (
     <div style={{ background: "#111", border: "1px solid #D4AF3722", borderRadius: 12, padding: 10 }}>
@@ -369,6 +422,7 @@ function Stat({ label, value }) {
     </div>
   );
 }
+
 function Sparkline({ points = [], height = 40 }) {
   if (!points.length) return null;
   const d = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
@@ -379,5 +433,4 @@ function Sparkline({ points = [], height = 40 }) {
       <path d={d} fill="none" stroke={stroke} strokeWidth="2" />
     </svg>
   );
-}
-/* END OF FILE */
+                       }
