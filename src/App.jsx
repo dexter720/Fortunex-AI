@@ -1,17 +1,16 @@
 import React from "react";
 
-/* =============================
-   FORTUNEX AI v3a.1 (Unified Mood)
+/* ============================================
+   FORTUNEX AI v4
+   - Tabs: Analyzer • Top Movers • Favorites
    - Robust fetch: link / raw address / search
-   - AI Insight + Fortune Score (0–100)
-   - Sub-scores: Stability / Growth / Momentum (0–10)
-   - Buyer/Seller, Liquidity, Volume, Pair Age, Sparkline
-   - Mood badge & Raw Score color aligned with AI mood
-   - History, Favorites, Copy Summary
-   - Free gate (2/day) + Stripe upgrade modal
-============================= */
+   - AI Insight + Fortune Score + sub-scores
+   - Sparkline, Liquidity, Volume, Tx, Pair Age
+   - Compare Mode (Pro-gated)
+   - 2/day free gate + Stripe upgrade modal
+============================================ */
 
-// ---- Stripe Payment Links (replace with your real links) ----
+// ---- Stripe Payment Links (replace with your live links) ----
 export const STRIPE_PRO_LINK   = "https://buy.stripe.com/test_PRO_LINK";
 export const STRIPE_ELITE_LINK = "https://buy.stripe.com/test_ELITE_LINK";
 
@@ -22,21 +21,16 @@ const DS_API = "https://api.dexscreener.com/latest/dex/";
 function parseDexInput(raw) {
   try {
     const txt = raw.trim();
-    // raw pair/token heuristic
-    if (/^[0-9a-zA-Z]{32,}$/.test(txt)) return { kind: "raw", id: txt };
+    if (/^[0-9a-zA-Z]{32,}$/.test(txt)) return { kind: "raw", id: txt }; // raw pair/token
 
-    // try as URL
     const url = new URL(txt);
     const host = url.hostname.toLowerCase();
     const parts = url.pathname.split("/").filter(Boolean);
-
     if (host.includes("dexscreener.com") && parts.length >= 2) {
-      // https://dexscreener.com/<chain>/<pair>
-      return { kind: "dex", chain: parts[0], id: parts[1] };
+      return { kind: "dex", chain: parts[0], id: parts[1] }; // /chain/pair
     }
     return { kind: "search", q: txt };
   } catch {
-    // not a URL → raw or search
     if (/^[0-9a-zA-Z]{32,}$/.test(raw.trim())) return { kind: "raw", id: raw.trim() };
     return { kind: "search", q: raw.trim() };
   }
@@ -45,14 +39,8 @@ function parseDexInput(raw) {
 /** Try multiple endpoints until one returns pairs */
 async function fetchDexSmart(parsed) {
   const tries = [];
-
-  if (parsed?.kind === "dex") {
-    tries.push(`${DS_API}pairs/${parsed.chain}/${parsed.id}`);
-  }
-  if (parsed?.kind === "raw") {
-    tries.push(`${DS_API}tokens/${parsed.id}`);
-  }
-  // Always add search fallback (works for address, symbol, or pasted text)
+  if (parsed?.kind === "dex")  tries.push(`${DS_API}pairs/${parsed.chain}/${parsed.id}`);
+  if (parsed?.kind === "raw")  tries.push(`${DS_API}tokens/${parsed.id}`);
   tries.push(`${DS_API}search?q=${encodeURIComponent(parsed?.q || parsed?.id || "")}`);
 
   for (const u of tries) {
@@ -61,11 +49,33 @@ async function fetchDexSmart(parsed) {
       if (!r.ok) continue;
       const d = await r.json();
       if (d?.pairs?.length) return d;
-    } catch {
-      // ignore and continue
-    }
+    } catch {}
   }
   return null;
+}
+
+/** Simple "Top Movers" source (broad search by chain keyword + sort) */
+async function fetchMovers(chain = "solana", sortKey = "pct") {
+  // We use search endpoint (broad) then rank by 24h change or volume.
+  const r = await fetch(`${DS_API}search?q=${encodeURIComponent(chain)}`, { headers: { Accept: "application/json" } });
+  if (!r.ok) return [];
+  const d = await r.json();
+  const arr = Array.isArray(d?.pairs) ? d.pairs : [];
+  const minLiq = 20000;             // ignore dust
+  const minVol = 20000;
+  const filtered = arr.filter(p => (p?.liquidity?.usd ?? 0) >= minLiq && (p?.volume?.h24 ?? 0) >= minVol);
+  if (sortKey === "vol") {
+    return filtered.sort((a,b)=> (b.volume?.h24 ?? 0) - (a.volume?.h24 ?? 0)).slice(0, 25);
+  }
+  // default: absolute 24h change first, tie-breaker by volume
+  return filtered
+    .sort((a,b)=>{
+      const ap = Math.abs(a?.priceChange?.h24 ?? 0);
+      const bp = Math.abs(b?.priceChange?.h24 ?? 0);
+      if (bp !== ap) return bp - ap;
+      return (b.volume?.h24 ?? 0) - (a.volume?.h24 ?? 0);
+    })
+    .slice(0, 25);
 }
 
 // ---- utils ----
@@ -89,8 +99,7 @@ function scoreFrom(pair) {
   const change = pair?.priceChange?.h24 ?? 0;
   const base = Math.log10(liq + vol + 1) * 10 + (buys - sells) + change;
   const total = Math.round(clamp(base, 0, 100));
-  // label no longer used for UI; AI mood is the source of truth
-  const label = total > 50 ? "Bullish" : total < 50 ? "Bearish" : "Neutral";
+  const label = total > 50 ? "Bullish" : total < 50 ? "Bearish" : "Neutral"; // informational only
   return { total, label };
 }
 
@@ -112,23 +121,17 @@ function analyzeQualities(pair) {
   const sells= Number(pair?.txns?.h24?.sells ?? 0);
   const buyerShare = (buys + sells) ? buys / (buys + sells) : 0.5;
 
-  // 0..10 subs
   let stability = (Math.log10(liq + 1) * 1.6) - (Math.min(Math.abs(ch24), 50) / 25);
   stability = clamp(stability, 0, 10);
 
   let growth = (Math.log10(vol24 + 1) * 1.6) + (clamp(ch24, -20, 20) / 10);
   growth = clamp(growth, 0, 10);
 
-  const bias = (buyerShare - 0.5) * 20; // -10..+10
+  const bias = (buyerShare - 0.5) * 20;
   let momentum = 5 + bias * 0.6 + clamp((ch1 + ch6) / 4, -5, 5);
   momentum = clamp(momentum, 0, 10);
 
-  // 0..100 fortune
-  const fortune = clamp(
-    Math.round((stability * 3 + growth * 3 + momentum * 4) * 2.5),
-    0, 100
-  );
-
+  const fortune = clamp(Math.round((stability * 3 + growth * 3 + momentum * 4) * 2.5), 0, 100);
   const mood = fortune > 75 ? "Bullish" : fortune < 35 ? "Bearish" : "Neutral";
 
   const reasons = [];
@@ -165,11 +168,10 @@ function buildSparkPoints(pc = {}) {
   return seq.map((p) => ({ x: (p.t / 24) * 100, y: 100 - ((p.v - min) / range) * 100 }));
 }
 
-// Mood color helper (for badge & raw score)
 function moodColor(mood) {
-  if (mood === "Bullish") return "#2ECC71"; // green
-  if (mood === "Bearish") return "#E74C3C"; // red
-  return "#F1C40F";                          // gold (Neutral)
+  if (mood === "Bullish") return "#2ECC71";
+  if (mood === "Bearish") return "#E74C3C";
+  return "#F1C40F"; // Neutral
 }
 
 // ---- storage keys ----
@@ -179,11 +181,18 @@ const LSK_DAILY = (d = new Date()) =>
 const LSK_HISTORY = "fx_history";
 const LSK_FAVS = "fx_favorites";
 
+// ---- Main App ----
 export default function FortunexAIApp() {
+  const [tab, setTab] = React.useState("analyze"); // analyze | movers | favs
+
   const [link, setLink] = React.useState("");
   const [result, setResult] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
   const [showUpgrade, setShowUpgrade] = React.useState(false);
+  const [compareOpen, setCompareOpen] = React.useState(false);
+  const [compareLink, setCompareLink] = React.useState("");
+  const [compareRes, setCompareRes] = React.useState(null);
+
   const [isPro, setIsPro] = React.useState(() => {
     try { return JSON.parse(localStorage.getItem(LSK_PRO) || "false"); }
     catch { return false; }
@@ -197,6 +206,12 @@ export default function FortunexAIApp() {
     catch { return []; }
   });
 
+  // Movers state
+  const [mChain, setMChain] = React.useState("solana");
+  const [mSort, setMSort] = React.useState("pct"); // pct | vol
+  const [movers, setMovers] = React.useState([]);
+  const [mLoading, setMLoading] = React.useState(false);
+
   const FREE_LIMIT = 2;
 
   // Auto-upgrade from Stripe (?pro=1)
@@ -209,6 +224,21 @@ export default function FortunexAIApp() {
       window.history.replaceState({}, "", url);
     }
   }, []);
+
+  // Load movers when tab opens
+  React.useEffect(() => {
+    if (tab !== "movers") return;
+    let isMounted = true;
+    (async () => {
+      setMLoading(true);
+      const list = await fetchMovers(mChain, mSort);
+      if (isMounted) {
+        setMovers(list);
+        setMLoading(false);
+      }
+    })();
+    return () => { isMounted = false; };
+  }, [tab, mChain, mSort]);
 
   const getCount = () => {
     try { return parseInt(localStorage.getItem(LSK_DAILY()) || "0", 10) || 0; }
@@ -232,12 +262,8 @@ export default function FortunexAIApp() {
   }
 
   async function analyze() {
-    if (!isPro && getCount() >= FREE_LIMIT) {
-      setShowUpgrade(true);
-      return;
-    }
-    setLoading(true);
-    setResult(null);
+    if (!isPro && getCount() >= FREE_LIMIT) { setShowUpgrade(true); return; }
+    setLoading(true); setResult(null);
 
     const parsed = parseDexInput(link);
     const data = await fetchDexSmart(parsed);
@@ -245,24 +271,33 @@ export default function FortunexAIApp() {
 
     const baseScore = scoreFrom(top);
     const qual = analyzeQualities(top);
-
     const res = { parsed, top, score: baseScore, qual };
     setResult(res);
     setLoading(false);
 
     if (!isPro) incCount();
-
     if (top) {
       pushHistory({
         id: top.pairAddress ?? parsed?.id ?? link,
         symbol: `${top?.baseToken?.symbol ?? "?"}/${top?.quoteToken?.symbol ?? "?"}`,
         price: Number(top?.priceUsd ?? 0),
         score: baseScore.total,
-        label: qual.mood, // store mood label for history chip
+        label: qual.mood,
         ts: Date.now(),
         link: `https://dexscreener.com/${top.chainId ?? parsed?.chain}/${top.pairAddress ?? parsed?.id ?? ""}`,
       });
     }
+  }
+
+  async function runCompare() {
+    if (!isPro) { setShowUpgrade(true); return; }
+    setCompareRes(null);
+    const p = parseDexInput(compareLink);
+    const d = await fetchDexSmart(p);
+    const t = d?.pairs?.[0] ?? null;
+    const baseScore = scoreFrom(t);
+    const qual = analyzeQualities(t);
+    setCompareRes({ parsed: p, top: t, score: baseScore, qual });
   }
 
   function copySummary() {
@@ -283,7 +318,6 @@ export default function FortunexAIApp() {
     alert("Summary copied to clipboard.");
   }
 
-  // handy locals for UI
   const p = result?.top;
   const mood = result?.qual?.mood || result?.score?.label || "Neutral";
   const moodCol = moodColor(mood);
@@ -294,7 +328,7 @@ export default function FortunexAIApp() {
     <div style={{ minHeight: "100vh", background: "linear-gradient(#0A1A2F,#111)", color: "#fff", fontFamily: "Inter,system-ui,Arial", paddingBottom: 40 }}>
       {/* Header */}
       <header style={{ position: "sticky", top: 0, backdropFilter: "blur(4px)", borderBottom: "1px solid #D4AF37", background: "#0A1A2Fcc", zIndex: 10 }}>
-        <div style={{ maxWidth: 900, margin: "0 auto", padding: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ maxWidth: 980, margin: "0 auto", padding: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <div style={{ width: 40, height: 40, borderRadius: 20, background: "linear-gradient(135deg,#D4AF37,#2E86DE)", display: "grid", placeItems: "center", color: "#000", fontWeight: 800 }}>F</div>
             <div>
@@ -304,177 +338,254 @@ export default function FortunexAIApp() {
           </div>
           <a href="#" onClick={(e) => { e.preventDefault(); setShowUpgrade(true); }} style={{ fontSize: 12, color: "#D4AF37", textDecoration: "underline" }}>Pricing</a>
         </div>
+        {/* Tabs */}
+        <div style={{ maxWidth: 980, margin: "0 auto", padding: "8px 12px", display: "flex", gap: 8 }}>
+          {["analyze","movers","favs"].map(t => (
+            <button key={t} onClick={()=>setTab(t)}
+              style={{
+                background: tab===t ? "#162844" : "transparent",
+                border: "1px solid #2a3b5a",
+                color: "#fff",
+                borderRadius: 12, padding: "8px 12px", fontWeight: 600
+              }}>
+              {t==="analyze"?"Analyzer":t==="movers"?"Top Movers":"Favorites"}
+            </button>
+          ))}
+        </div>
       </header>
 
       {/* Main */}
-      <main style={{ maxWidth: 900, margin: "0 auto", padding: 12, display: "grid", gap: 12 }}>
-        {/* Input Card */}
-        <div style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
-          <div style={{ fontSize: 14, marginBottom: 8 }}>Paste DEX link / address / name</div>
-          <input
-            value={link}
-            onChange={(e) => setLink(e.target.value)}
-            placeholder="e.g., https://dexscreener.com/solana/PAIR  or  7xKXJ8K...  or  BONK"
-            style={{ width: "100%", background: "#111", border: "1px solid #D4AF3722", color: "#fff", borderRadius: 12, padding: "10px 12px" }}
-          />
-          <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12 }}>
-            <button onClick={analyze} disabled={loading} style={{ background: "linear-gradient(90deg,#D4AF37,#2E86DE)", color: "#000", fontWeight: 700, border: "none", padding: "10px 16px", borderRadius: 12 }}>
-              {loading ? "Analyzing..." : "Analyze"}
-            </button>
-            {!isPro && <div style={{ fontSize: 12, opacity: 0.8 }}>Free uses today: {Math.min(getCount(), FREE_LIMIT)} / {FREE_LIMIT}</div>}
-          </div>
-        </div>
+      <main style={{ maxWidth: 980, margin: "0 auto", padding: 12, display: "grid", gap: 12 }}>
 
-        {/* No data message */}
-        {result && !result.top && (
-          <div style={{ background: "#311", border: "1px solid #a33", borderRadius: 12, padding: 12 }}>
-            Couldn’t find live data for that input. Try a full Dexscreener link like{" "}
-            <code>https://dexscreener.com/solana/&lt;pair&gt;</code>, a raw pair/token address, or a token name.
-            (Very new/illiquid pairs may not have stats yet.)
-          </div>
-        )}
-
-        {/* Result Card */}
-        {result && result.top && (
-          <div style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
-            {/* Header row — mood badge & raw score colorized */}
-            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-              {p?.info?.imageUrl && (
-                <img src={p.info.imageUrl} alt="token" width={32} height={32} style={{ borderRadius: 8, background: "#111" }} />
-              )}
-
-              <div style={{ fontWeight: 700 }}>
-                {p ? `${p.baseToken?.symbol ?? "?"}/${p.quoteToken?.symbol ?? "?"}` : "—"}
-              </div>
-
-              <span style={{
-                border: `1px solid ${moodCol}`,
-                color: moodCol,
-                fontWeight: 700,
-                fontSize: 12,
-                borderRadius: 8,
-                padding: "2px 8px",
-              }}>
-                {mood}
-              </span>
-
-              <span style={{ fontSize: 12, color: moodCol }}>
-                Raw Score: {result.score.total}/100
-              </span>
-
-              {p?.pairAddress && (
-                <a
-                  href={`https://dexscreener.com/${p.chainId}/${p.pairAddress}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ marginLeft: "auto", fontSize: 12, color: "#2E86DE" }}
-                >
-                  View on Dexscreener ↗
-                </a>
-              )}
-              {p?.pairAddress && (
-                <button
-                  onClick={() => toggleFav(p.pairAddress)}
-                  title="Favorite"
-                  style={{ marginLeft: 8, background: "transparent", border: "1px solid #D4AF37", color: "#D4AF37", borderRadius: 8, padding: "2px 8px" }}
-                >
-                  {favs.includes(p.pairAddress) ? "★" : "☆"}
+        {/* ----- ANALYZER TAB ----- */}
+        {tab==="analyze" && (
+          <>
+            {/* Input Card */}
+            <div style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
+              <div style={{ fontSize: 14, marginBottom: 8 }}>Paste DEX link / address / name</div>
+              <input
+                value={link}
+                onChange={(e) => setLink(e.target.value)}
+                placeholder="https://dexscreener.com/solana/PAIR  or  7xKXJ8K...  or  BONK"
+                style={{ width: "100%", background: "#111", border: "1px solid #D4AF3722", color: "#fff", borderRadius: 12, padding: "10px 12px" }}
+              />
+              <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12, flexWrap: "wrap" }}>
+                <button onClick={analyze} disabled={loading}
+                  style={{ background: "linear-gradient(90deg,#D4AF37,#2E86DE)", color: "#000", fontWeight: 700, border: "none", padding: "10px 16px", borderRadius: 12 }}>
+                  {loading ? "Analyzing..." : "Analyze"}
                 </button>
-              )}
-            </div>
-
-            {/* AI Insight + Fortune Score */}
-            <div style={{ marginTop: 12, background: "#111", border: "1px solid #222", borderRadius: 12, padding: 12 }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <span style={{ background: "#D4AF37", color: "#000", fontWeight: 700, borderRadius: 8, padding: "2px 8px" }}>
-                  Fortune Score: {result.qual.fortune}/100
-                </span>
-                <span style={{ fontSize: 12, color: "#D4AF37cc" }}>
-                  {result.qual.mood} • Buyer Share {result.qual.buyerShare}%
-                </span>
-              </div>
-
-              {/* Sub-score bars */}
-              <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-                <Bar label="Stability" value={result.qual.stability} />
-                <Bar label="Growth"    value={result.qual.growth} />
-                <Bar label="Momentum"  value={result.qual.momentum} />
-              </div>
-
-              <div style={{ marginTop: 10, fontSize: 14, color: "#eee" }}>
-                <b>AI Insight:</b> {result.qual.insight}
+                {!isPro && <div style={{ fontSize: 12, opacity: 0.8 }}>Free uses today: {Math.min(getCount(), FREE_LIMIT)} / {FREE_LIMIT}</div>}
+                <button onClick={()=> setCompareOpen(true)} style={{ border: "1px solid #2E86DE", color: "#2E86DE", borderRadius: 12, padding: "8px 12px", background: "transparent" }}>
+                  Compare Pair (Pro)
+                </button>
               </div>
             </div>
 
-            {/* Sparkline */}
-            <div style={{ marginTop: 12 }}>
-              <Sparkline points={buildSparkPoints(p?.priceChange)} height={50} />
-              <div style={{ fontSize: 12, color: "#D4AF37aa", marginTop: 4 }}>
-                1h: {pct(p?.priceChange?.h1)} • 6h: {pct(p?.priceChange?.h6)} • 24h: {pct(p?.priceChange?.h24)}
+            {/* No data */}
+            {result && !result.top && (
+              <div style={{ background: "#311", border: "1px solid #a33", borderRadius: 12, padding: 12 }}>
+                Couldn’t find live data for that input. Try a full Dexscreener link, a raw pair/token address, or a token name.
               </div>
-            </div>
+            )}
 
-            {/* Stats grid */}
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8, marginTop: 12, fontSize: 14 }}>
-              <Stat label="Price" value={`$${Number(p?.priceUsd ?? 0).toFixed(6)}`} />
-              <Stat label="Liquidity" value={`$${k(p?.liquidity?.usd)}`} />
-              <Stat label="Vol 24h" value={`$${k(p?.volume?.h24)}`} />
-              <Stat label="Tx 24h" value={`${buys} buys / ${sells} sells`} />
-              <Stat label="Pair Age" value={fmtDate(p?.pairCreatedAt)} />
-            </div>
-
-            {/* Actions */}
-            <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-              <button onClick={copySummary} style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #D4AF37", color: "#D4AF37", background: "transparent" }}>
-                Copy summary
-              </button>
-              <button onClick={() => setShowUpgrade(true)} style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #2E86DE", color: "#2E86DE", background: "transparent" }}>
-                Export PDF (Pro)
-              </button>
-            </div>
-
-            <div style={{ marginTop: 10, fontSize: 12, color: "#D4AF37aa" }}>
-              Educational insights only — Not financial advice.
-            </div>
-          </div>
-        )}
-
-        {/* History + Favorites */}
-        {(history.length > 0 || favs.length > 0) && (
-          <div style={{ display: "grid", gap: 12 }}>
-            {history.length > 0 && (
+            {/* Result Card */}
+            {result && result.top && (
               <div style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
-                <div style={{ fontWeight: 700, marginBottom: 8 }}>Recent Analyses</div>
-                <div style={{ display: "grid", gap: 8 }}>
-                  {history.map((h, i) => (
-                    <div key={i} style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 14 }}>
-                      <span style={{ width: 64, opacity: 0.8 }}>
-                        {new Date(h.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                      </span>
-                      <span style={{ flex: 1 }}>{h.symbol}</span>
-                      <span style={{ opacity: 0.8 }}>${Number(h.price).toFixed(6)}</span>
-                      <span style={{ background: "#222", border: "1px solid #444", borderRadius: 8, padding: "2px 8px" }}>
-                        {h.label} {h.score}/100
-                      </span>
-                      <a href={h.link} target="_blank" rel="noreferrer" style={{ color: "#2E86DE" }}>
-                        Open ↗
-                      </a>
-                    </div>
-                  ))}
+                {/* Header row */}
+                <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  {p?.info?.imageUrl && <img src={p.info.imageUrl} alt="token" width={32} height={32} style={{ borderRadius: 8, background: "#111" }} />}
+                  <div style={{ fontWeight: 700 }}>
+                    {p ? `${p.baseToken?.symbol ?? "?"}/${p.quoteToken?.symbol ?? "?"}` : "—"}
+                  </div>
+                  <span style={{ border: `1px solid ${moodCol}`, color: moodCol, fontWeight: 700, fontSize: 12, borderRadius: 8, padding: "2px 8px" }}>{mood}</span>
+                  <span style={{ fontSize: 12, color: moodCol }}>Raw Score: {result.score.total}/100</span>
+                  {p?.pairAddress && (
+                    <a href={`https://dexscreener.com/${p.chainId}/${p.pairAddress}`} target="_blank" rel="noreferrer" style={{ marginLeft: "auto", fontSize: 12, color: "#2E86DE" }}>
+                      View on Dexscreener ↗
+                    </a>
+                  )}
+                  {p?.pairAddress && (
+                    <button onClick={() => toggleFav(p.pairAddress)} title="Favorite"
+                      style={{ marginLeft: 8, background: "transparent", border: "1px solid #D4AF37", color: "#D4AF37", borderRadius: 8, padding: "2px 8px" }}>
+                      {favs.includes(p.pairAddress) ? "★" : "☆"}
+                    </button>
+                  )}
+                </div>
+
+                {/* AI Insight + Fortune */}
+                <div style={{ marginTop: 12, background: "#111", border: "1px solid #222", borderRadius: 12, padding: 12 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ background: "#D4AF37", color: "#000", fontWeight: 700, borderRadius: 8, padding: "2px 8px" }}>
+                      Fortune Score: {result.qual.fortune}/100
+                    </span>
+                    <span style={{ fontSize: 12, color: "#D4AF37cc" }}>
+                      {result.qual.mood} • Buyer Share {result.qual.buyerShare}%
+                    </span>
+                  </div>
+                  <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+                    <Bar label="Stability" value={result.qual.stability} />
+                    <Bar label="Growth"    value={result.qual.growth} />
+                    <Bar label="Momentum"  value={result.qual.momentum} />
+                  </div>
+                  <div style={{ marginTop: 10, fontSize: 14, color: "#eee" }}>
+                    <b>AI Insight:</b> {result.qual.insight}
+                  </div>
+                </div>
+
+                {/* Sparkline */}
+                <div style={{ marginTop: 12 }}>
+                  <Sparkline points={buildSparkPoints(p?.priceChange)} height={50} />
+                  <div style={{ fontSize: 12, color: "#D4AF37aa", marginTop: 4 }}>
+                    1h: {pct(p?.priceChange?.h1)} • 6h: {pct(p?.priceChange?.h6)} • 24h: {pct(p?.priceChange?.h24)}
+                  </div>
+                </div>
+
+                {/* Stats */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8, marginTop: 12 }}>
+                  <Stat label="Price" value={`$${Number(p?.priceUsd ?? 0).toFixed(6)}`} />
+                  <Stat label="Liquidity" value={`$${k(p?.liquidity?.usd)}`} />
+                  <Stat label="Vol 24h" value={`$${k(p?.volume?.h24)}`} />
+                  <Stat label="Tx 24h" value={`${buys} buys / ${sells} sells`} />
+                  <Stat label="Pair Age" value={fmtDate(p?.pairCreatedAt)} />
+                </div>
+
+                {/* Actions */}
+                <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                  <button onClick={copySummary} style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #D4AF37", color: "#D4AF37", background: "transparent" }}>
+                    Copy summary
+                  </button>
+                  <button onClick={() => setShowUpgrade(true)} style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #2E86DE", color: "#2E86DE", background: "transparent" }}>
+                    Export PDF (Pro)
+                  </button>
+                </div>
+
+                <div style={{ marginTop: 10, fontSize: 12, color: "#D4AF37aa" }}>
+                  Educational insights only — Not financial advice.
                 </div>
               </div>
             )}
-            {favs.length > 0 && (
-              <div style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
-                <div style={{ fontWeight: 700, marginBottom: 8 }}>Favorites</div>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  {favs.map((id) => (
-                    <span key={id} style={{ border: "1px solid #D4AF37", color: "#D4AF37", borderRadius: 999, padding: "6px 10px", fontSize: 12 }}>
-                      ★ {id.slice(0, 6)}…{id.slice(-4)}
-                    </span>
-                  ))}
+
+            {/* Compare Modal (Pro) */}
+            {compareOpen && (
+              <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "grid", placeItems: "center", zIndex: 30 }}>
+                <div style={{ width: "94%", maxWidth: 980, background: "#0A1A2F", border: "1px solid #2E86DE", borderRadius: 16, padding: 16 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                    <div style={{ fontWeight: 700 }}>Compare Pair (Pro)</div>
+                    <button onClick={()=>{ setCompareOpen(false); setCompareRes(null); }} style={{ background:"transparent", border:"1px solid #444", color:"#fff", borderRadius:8, padding:"4px 8px" }}>Close</button>
+                  </div>
+                  {!isPro && (
+                    <div style={{ marginTop: 8, background:"#311", border:"1px solid #a33", borderRadius:12, padding:10 }}>
+                      Compare Mode is a Pro feature. Upgrade to unlock.
+                      <div style={{ marginTop:8 }}>
+                        <a href={STRIPE_PRO_LINK} style={{ color:"#2E86DE", textDecoration:"underline" }}>Upgrade now →</a>
+                      </div>
+                    </div>
+                  )}
+                  <div style={{ display:"grid", gap:8, marginTop: 12 }}>
+                    <input value={compareLink} onChange={e=>setCompareLink(e.target.value)} placeholder="Paste second link / address / name"
+                      style={{ width:"100%", background:"#111", border:"1px solid #2E86DE55", color:"#fff", borderRadius:12, padding:"10px 12px" }} />
+                    <button onClick={runCompare} disabled={!isPro} style={{ border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:12, padding:"8px 12px" }}>
+                      Analyze & Compare
+                    </button>
+                  </div>
+
+                  <div style={{ display:"grid", gap:12, gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))", marginTop: 16 }}>
+                    {result?.top && <CompareCard title="Token A" data={result} />}
+                    {compareRes?.top && <CompareCard title="Token B" data={compareRes} />}
+                  </div>
+
+                  {result?.top && compareRes?.top && (
+                    <CompareTable a={result} b={compareRes} />
+                  )}
                 </div>
               </div>
+            )}
+          </>
+        )}
+
+        {/* ----- MOVERS TAB ----- */}
+        {tab==="movers" && (
+          <div style={{ background:"#0A1A2F", border:"1px solid #D4AF3755", borderRadius:16, padding:16 }}>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
+              <label>Chain:</label>
+              <select value={mChain} onChange={e=>setMChain(e.target.value)}
+                style={{ background:"#111", color:"#fff", border:"1px solid #2a3b5a", borderRadius:8, padding:"6px 8px" }}>
+                {["solana","ethereum","bsc","base","polygon","arbitrum","avalanche"].map(c=>(
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+              <label>Sort:</label>
+              <select value={mSort} onChange={e=>setMSort(e.target.value)}
+                style={{ background:"#111", color:"#fff", border:"1px solid #2a3b5a", borderRadius:8, padding:"6px 8px" }}>
+                <option value="pct">24h % Change</option>
+                <option value="vol">24h Volume</option>
+              </select>
+              <div style={{ marginLeft:"auto", fontSize:12, color:"#D4AF37aa" }}>Auto-refresh when you switch filters</div>
+            </div>
+
+            {mLoading && <div style={{ marginTop:12, opacity:.8 }}>Loading movers…</div>}
+            {!mLoading && movers.length===0 && (
+              <div style={{ marginTop:12, background:"#311", border:"1px solid #a33", borderRadius:12, padding:10 }}>
+                No movers found for this filter. Try another chain.
+              </div>
+            )}
+
+            <div style={{ marginTop:12, display:"grid", gap:8 }}>
+              {movers.map((x, i)=>(
+                <div key={x?.pairAddress || i} style={{ display:"grid", gridTemplateColumns:"40px 1fr 110px 120px 130px 120px", gap:8, alignItems:"center", background:"#111", border:"1px solid #2a3b5a", borderRadius:12, padding:"8px 10px" }}>
+                  <div style={{ opacity:.8 }}>#{i+1}</div>
+                  <div style={{ display:"flex", alignItems:"center", gap:8, overflow:"hidden" }}>
+                    {x?.info?.imageUrl && <img src={x.info.imageUrl} width={24} height={24} style={{ borderRadius:6 }} />}
+                    <div style={{ whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+                      {x?.baseToken?.symbol}/{x?.quoteToken?.symbol}
+                      <div style={{ fontSize:11, opacity:.7 }}>{x?.chainId}</div>
+                    </div>
+                  </div>
+                  <div style={{ color: (x?.priceChange?.h24 ?? 0) >= 0 ? "#2ECC71" : "#E74C3C", fontWeight:700 }}>
+                    {pct(x?.priceChange?.h24)}
+                  </div>
+                  <div>${k(x?.volume?.h24)} Vol</div>
+                  <div>${k(x?.liquidity?.usd)} Liq</div>
+                  <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
+                    <a href={`https://dexscreener.com/${x.chainId}/${x.pairAddress}`} target="_blank" rel="noreferrer" style={{ color:"#2E86DE" }}>Open ↗</a>
+                    <button onClick={()=>{ setTab("analyze"); setLink(`https://dexscreener.com/${x.chainId}/${x.pairAddress}`); }}
+                      style={{ border:"1px solid #D4AF37", color:"#D4AF37", background:"transparent", borderRadius:8, padding:"4px 8px" }}>
+                      Analyze
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ----- FAVORITES TAB ----- */}
+        {tab==="favs" && (
+          <div style={{ background:"#0A1A2F", border:"1px solid #D4AF3755", borderRadius:16, padding:16 }}>
+            <div style={{ fontWeight:700, marginBottom:8 }}>Favorites</div>
+            {favs.length === 0 && <div style={{ opacity:.8 }}>You haven’t added any favorites yet.</div>}
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+              {favs.map((id)=>(
+                <span key={id} style={{ border:"1px solid #D4AF37", color:"#D4AF37", borderRadius:999, padding:"6px 10px", fontSize:12 }}>
+                  ★ {id.slice(0,6)}…{id.slice(-4)}
+                </span>
+              ))}
+            </div>
+            {history.length>0 && (
+              <>
+                <div style={{ fontWeight:700, margin:"16px 0 8px" }}>Recent Analyses</div>
+                <div style={{ display:"grid", gap:8 }}>
+                  {history.map((h, i)=>(
+                    <div key={i} style={{ display:"flex", gap:10, alignItems:"center", fontSize:14 }}>
+                      <span style={{ width:64, opacity:.8 }}>{new Date(h.ts).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})}</span>
+                      <span style={{ flex:1 }}>{h.symbol}</span>
+                      <span style={{ opacity:.8 }}>${Number(h.price).toFixed(6)}</span>
+                      <span style={{ background:"#222", border:"1px solid #444", borderRadius:8, padding:"2px 8px" }}>{h.label} {h.score}/100</span>
+                      <a href={h.link} target="_blank" rel="noreferrer" style={{ color:"#2E86DE" }}>Open ↗</a>
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         )}
@@ -482,73 +593,126 @@ export default function FortunexAIApp() {
 
       {/* Upgrade Modal */}
       {showUpgrade && (
-        <div style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", background: "rgba(0,0,0,.6)", backdropFilter: "blur(2px)" }}>
-          <div style={{ width: "92%", maxWidth: 420, background: "#0A1A2F", border: "1px solid #D4AF37", borderRadius: 16, padding: 16 }}>
-            <div style={{ textAlign: "center", marginBottom: 8 }}>
-              <div style={{ width: 48, height: 48, margin: "0 auto", borderRadius: 24, background: "linear-gradient(135deg,#D4AF37,#2E86DE)", display: "grid", placeItems: "center", color: "#000", fontWeight: 800 }}>F</div>
+        <div style={{ position:"fixed", inset:0, display:"grid", placeItems:"center", background:"rgba(0,0,0,.6)", backdropFilter:"blur(2px)" }}>
+          <div style={{ width:"92%", maxWidth:420, background:"#0A1A2F", border:"1px solid #D4AF37", borderRadius:16, padding:16 }}>
+            <div style={{ textAlign:"center", marginBottom:8 }}>
+              <div style={{ width:48, height:48, margin:"0 auto", borderRadius:24, background:"linear-gradient(135deg,#D4AF37,#2E86DE)", display:"grid", placeItems:"center", color:"#000", fontWeight:800 }}>F</div>
             </div>
-            <div style={{ textAlign: "center", fontWeight: 700, fontSize: 18 }}>You’ve reached your free limit</div>
-            <div style={{ textAlign: "center", opacity: 0.85, fontSize: 14, marginTop: 6 }}>
-              You’ve completed 2 analyses today. Upgrade to unlock unlimited insights and advanced learning tools.
+            <div style={{ textAlign:"center", fontWeight:700, fontSize:18 }}>Unlock Pro Features</div>
+            <div style={{ textAlign:"center", opacity:.85, fontSize:14, marginTop:6 }}>
+              Unlimited analyses, Compare Mode, and shareable reports.
             </div>
-            <ul style={{ marginTop: 8, fontSize: 14, lineHeight: 1.6 }}>
-              <li>• Unlimited analyses per day</li>
-              <li>• Momentum & buyer/seller trends</li>
-              <li>• Shareable PDF summaries</li>
+            <ul style={{ marginTop:8, fontSize:14, lineHeight:1.6 }}>
+              <li>• Unlimited daily analyses</li>
+              <li>• ⚖️ Compare mode</li>
+              <li>• 🧠 Deeper insights & PDF (coming)</li>
             </ul>
-            <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
-              <a href={STRIPE_PRO_LINK} style={{ textAlign: "center", borderRadius: 12, padding: "10px 12px", fontWeight: 700, background: "linear-gradient(90deg,#D4AF37,#2E86DE)", color: "#000" }}>
+            <div style={{ display:"grid", gap:8, marginTop:12 }}>
+              <a href={STRIPE_PRO_LINK} style={{ textAlign:"center", borderRadius:12, padding:"10px 12px", fontWeight:700, background:"linear-gradient(90deg,#D4AF37,#2E86DE)", color:"#000" }}>
                 🔓 Upgrade Now — €4.99/mo
               </a>
-              <button onClick={() => setShowUpgrade(false)} style={{ textAlign: "center", borderRadius: 12, padding: "10px 12px", fontWeight: 700, border: "1px solid #D4AF3788", color: "#D4AF37", background: "transparent" }}>
-                Remind me tomorrow
+              <button onClick={()=>setShowUpgrade(false)} style={{ textAlign:"center", borderRadius:12, padding:"10px 12px", fontWeight:700, border:"1px solid #D4AF3788", color:"#D4AF37", background:"transparent" }}>
+                Maybe later
               </button>
             </div>
-            <div style={{ textAlign: "center", marginTop: 6, fontSize: 12, color: "#D4AF37aa" }}>
+            <div style={{ textAlign:"center", marginTop:6, fontSize:12, color:"#D4AF37aa" }}>
               Educational purpose only — Not financial advice.
             </div>
           </div>
         </div>
       )}
 
-      <footer style={{ textAlign: "center", padding: 12, fontSize: 12, color: "#D4AF37aa" }}>© {new Date().getFullYear()} Fortunex AI</footer>
+      <footer style={{ textAlign:"center", padding:12, fontSize:12, color:"#D4AF37aa" }}>
+        © {new Date().getFullYear()} Fortunex AI
+      </footer>
     </div>
   );
 }
 
-/* ---------- Small UI helpers ---------- */
+/* ---------- UI helpers ---------- */
 function Stat({ label, value }) {
   return (
-    <div style={{ background: "#111", border: "1px solid #D4AF3722", borderRadius: 12, padding: 10 }}>
-      <div style={{ fontSize: 12, color: "#D4AF37cc" }}>{label}</div>
-      <div style={{ fontWeight: 600 }}>{value}</div>
+    <div style={{ background:"#111", border:"1px solid #D4AF3722", borderRadius:12, padding:10 }}>
+      <div style={{ fontSize:12, color:"#D4AF37cc" }}>{label}</div>
+      <div style={{ fontWeight:600 }}>{value}</div>
     </div>
   );
 }
-
 function Bar({ label, value }) {
   const p = Math.round((Number(value) / 10) * 100);
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
-        <span style={{ color: "#D4AF37cc" }}>{label}</span>
+      <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:4 }}>
+        <span style={{ color:"#D4AF37cc" }}>{label}</span>
         <span>{Number(value).toFixed(1)}/10</span>
       </div>
-      <div style={{ height: 10, background: "#1b1b1b", borderRadius: 8, overflow: "hidden", border: "1px solid #333" }}>
-        <div style={{ width: `${p}%`, height: "100%", background: "linear-gradient(90deg,#2E86DE,#D4AF37)" }} />
+      <div style={{ height:10, background:"#1b1b1b", borderRadius:8, overflow:"hidden", border:"1px solid #333" }}>
+        <div style={{ width:`${p}%`, height:"100%", background:"linear-gradient(90deg,#2E86DE,#D4AF37)" }} />
+      </div>
+    </div>
+  );
+}
+function Sparkline({ points = [], height = 50 }) {
+  if (!points.length) return null;
+  const d = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
+  const up = points[points.length - 1].y < points[0].y;
+  const stroke = up ? "#2ECC71" : "#E74C3C";
+  return (
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ width:"100%", height }}>
+      <path d={d} fill="none" stroke={stroke} strokeWidth="2" />
+    </svg>
+  );
+}
+
+/* ---------- Compare UI ---------- */
+function CompareCard({ title, data }) {
+  const p = data?.top;
+  const mood = data?.qual?.mood || "Neutral";
+  const moodCol = moodColor(mood);
+  const buys = p?.txns?.h24?.buys ?? 0;
+  const sells = p?.txns?.h24?.sells ?? 0;
+  return (
+    <div style={{ background:"#0A1A2F", border:"1px solid #2E86DE55", borderRadius:12, padding:12 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <div style={{ fontWeight:700 }}>{title}</div>
+        <span style={{ marginLeft:"auto", border:`1px solid ${moodCol}`, color:moodCol, borderRadius:8, padding:"2px 8px", fontSize:12 }}>{mood}</span>
+      </div>
+      <div style={{ fontWeight:700, marginTop:6 }}>{p?.baseToken?.symbol}/{p?.quoteToken?.symbol}</div>
+      <div style={{ fontSize:12, opacity:.8, marginBottom:6 }}>{p?.chainId}</div>
+
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(2,minmax(0,1fr))", gap:8 }}>
+        <Stat label="Price" value={`$${Number(p?.priceUsd ?? 0).toFixed(6)}`} />
+        <Stat label="Fortune" value={`${data?.qual?.fortune}/100`} />
+        <Stat label="Vol 24h" value={`$${k(p?.volume?.h24)}`} />
+        <Stat label="Liq" value={`$${k(p?.liquidity?.usd)}`} />
+        <Stat label="Buyer Share" value={`${data?.qual?.buyerShare}%`} />
+        <Stat label="Tx 24h" value={`${buys} / ${sells}`} />
       </div>
     </div>
   );
 }
 
-function Sparkline({ points = [], height = 50 }) {
-  if (!points.length) return null;
-  const d = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
-  const up = points[points.length - 1].y < points[0].y; // lower y = higher value
-  const stroke = up ? "#2ECC71" : "#E74C3C";
+function CompareTable({ a, b }) {
+  const rows = [
+    ["Fortune", a.qual.fortune, b.qual.fortune, v=>v],
+    ["Liquidity ($)", a.top?.liquidity?.usd ?? 0, b.top?.liquidity?.usd ?? 0, v=>"$"+k(v)],
+    ["Volume 24h ($)", a.top?.volume?.h24 ?? 0, b.top?.volume?.h24 ?? 0, v=>"$"+k(v)],
+    ["Buyer Share (%)", a.qual.buyerShare, b.qual.buyerShare, v=>v.toFixed(1)+"%"],
+    ["Price 24h (%)", a.top?.priceChange?.h24 ?? 0, b.top?.priceChange?.h24 ?? 0, v=>pct(v)],
+  ];
+  const winCol = (av,bv)=> (av>bv?"#2ECC7188":av<bv?"#E74C3C88":"transparent");
   return (
-    <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ width: "100%", height }}>
-      <path d={d} fill="none" stroke={stroke} strokeWidth="2" />
-    </svg>
+    <div style={{ marginTop:12, background:"#0A1A2F", border:"1px solid #2E86DE55", borderRadius:12, overflow:"hidden" }}>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", padding:"10px 12px", borderBottom:"1px solid #2a3b5a", fontWeight:700 }}>
+        <div>Metric</div><div style={{ textAlign:"center" }}>Token A</div><div style={{ textAlign:"center" }}>Token B</div>
+      </div>
+      {rows.map(([name,av,bv,fmt],i)=>(
+        <div key={i} style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", padding:"8px 12px", borderTop:"1px solid #1b2a44" }}>
+          <div style={{ opacity:.9 }}>{name}</div>
+          <div style={{ textAlign:"center", background:winCol(av,bv), borderRadius:6 }}>{fmt(Number(av)||0)}</div>
+          <div style={{ textAlign:"center", background:winCol(bv,av), borderRadius:6 }}>{fmt(Number(bv)||0)}</div>
+        </div>
+      ))}
+    </div>
   );
-                         }
+}
