@@ -1,14 +1,13 @@
 import React from "react";
 
 /* =============================
-   FORTUNEX AI v2 (robust fetch)
-   - Accepts: full Dexscreener link, raw pair/token address, or search text
-   - 2 free analyses/day gate
-   - Buyer/Seller ratio, Liquidity, Volume, Pair Age
-   - Sparkline (from h1/h6/h24)
-   - History + Favorites (localStorage)
-   - Copy summary
-   ============================= */
+   FORTUNEX AI v3a (Engage)
+   - AI Insight (rule-based summary)
+   - Fortune Score (0–100) + sub-scores:
+     • Stability • Growth • Momentum (0–10 bars)
+   - Robust fetch: link, raw address, search
+   - v2 features preserved
+============================= */
 
 // ---- Stripe Payment Links (replace with your real links) ----
 export const STRIPE_PRO_LINK   = "https://buy.stripe.com/test_PRO_LINK";
@@ -91,6 +90,66 @@ function scoreFrom(pair) {
   const total = Math.round(clamp(base, 0, 100));
   const label = total > 66 ? "Bullish" : total < 33 ? "Bearish" : "Neutral";
   return { total, label };
+}
+
+// Sub-scores (0..10) and AI insight (rule-based, local)
+function analyzeQualities(pair) {
+  if (!pair) {
+    return {
+      stability: 5, growth: 5, momentum: 5,
+      insight: "No live data found. Try a full Dexscreener link or a known pair address."
+    };
+  }
+  const liq = Number(pair?.liquidity?.usd ?? 0);          // higher = stability
+  const vol24 = Number(pair?.volume?.h24 ?? 0);           // demand proxy
+  const ch1 = Number(pair?.priceChange?.h1 ?? 0);
+  const ch6 = Number(pair?.priceChange?.h6 ?? 0);
+  const ch24 = Number(pair?.priceChange?.h24 ?? 0);
+  const buys = Number(pair?.txns?.h24?.buys ?? 0);
+  const sells= Number(pair?.txns?.h24?.sells ?? 0);
+  const buyerShare = (buys + sells) ? buys / (buys + sells) : 0.5;
+
+  // Stability: liquidity dominates; penalize extreme volatility (|24h change|)
+  let stability = (Math.log10(liq + 1) * 1.6) - (Math.min(Math.abs(ch24), 50) / 25); // ~0..10
+  stability = clamp(stability, 0, 10);
+
+  // Growth: 24h volume + positive price change
+  let growth = (Math.log10(vol24 + 1) * 1.6) + (clamp(ch24, -20, 20) / 10); // ~0..10
+  growth = clamp(growth, 0, 10);
+
+  // Momentum: buyer imbalance + recent change (1h/6h weighted)
+  const bias = (buyerShare - 0.5) * 20; // -10..+10
+  let momentum = 5 + bias * 0.6 + clamp((ch1 + ch6) / 4, -5, 5);
+  momentum = clamp(momentum, 0, 10);
+
+  // Fortune Score is weighted from subs + a small liquidity safety bonus
+  const fortune = clamp(
+    Math.round((stability * 3 + growth * 3 + momentum * 4) * 2.5), // 0..250 → clamp to 0..100 below
+    0, 100
+  );
+
+  // AI Insight (friendly, short)
+  let mood = fortune > 75 ? "Bullish" : fortune < 35 ? "Bearish" : "Neutral";
+  let reasonBits = [];
+  if (buyerShare > 0.58) reasonBits.push("strong buyer advantage");
+  if (buyerShare < 0.42) reasonBits.push("seller pressure");
+  if (ch24 > 8) reasonBits.push("solid 24h price gain");
+  if (ch24 < -8) reasonBits.push("24h price weakness");
+  if (liq > 500000) reasonBits.push("healthy liquidity");
+  if (vol24 > 300000) reasonBits.push("active trading volume");
+  if (reasonBits.length === 0) reasonBits.push("mixed signals");
+
+  const insight = `${mood} bias — ${reasonBits.slice(0, 3).join(", ")}.`;
+
+  return {
+    stability: Math.round(stability * 10) / 10,
+    growth: Math.round(growth * 10) / 10,
+    momentum: Math.round(momentum * 10) / 10,
+    fortune,
+    mood,
+    buyerShare: Math.round(buyerShare * 1000) / 10,
+    insight
+  };
 }
 
 // build a simple sparkline from 1h/6h/24h change
@@ -190,8 +249,11 @@ export default function FortunexAIApp() {
     const parsed = parseDexInput(link);
     const data = await fetchDexSmart(parsed);
     const top = data?.pairs?.[0] ?? null;
-    const score = scoreFrom(top);
-    const res = { parsed, top, score };
+
+    const baseScore = scoreFrom(top);
+    const qual = analyzeQualities(top);
+
+    const res = { parsed, top, score: baseScore, qual };
     setResult(res);
     setLoading(false);
 
@@ -202,8 +264,8 @@ export default function FortunexAIApp() {
         id: top.pairAddress ?? parsed?.id ?? link,
         symbol: `${top?.baseToken?.symbol ?? "?"}/${top?.quoteToken?.symbol ?? "?"}`,
         price: Number(top?.priceUsd ?? 0),
-        score: score.total,
-        label: score.label,
+        score: baseScore.total,
+        label: baseScore.label,
         ts: Date.now(),
         link: `https://dexscreener.com/${top.chainId ?? parsed?.chain}/${top.pairAddress ?? parsed?.id ?? ""}`,
       });
@@ -216,9 +278,11 @@ export default function FortunexAIApp() {
     const s = [
       `Fortunex AI — Analysis`,
       `${p.baseToken?.symbol}/${p.quoteToken?.symbol} • Price $${Number(p.priceUsd ?? 0).toFixed(6)}`,
-      `Score: ${result.score.total}/100 (${result.score.label})`,
+      `Fortune Score: ${result.qual.fortune}/100 (${result.qual.mood})`,
+      `Subs — Stability ${result.qual.stability}/10 • Growth ${result.qual.growth}/10 • Momentum ${result.qual.momentum}/10`,
       `24h Change: ${pct(p.priceChange?.h24)} | Vol24h: $${k(p.volume?.h24)} | Liq: $${k(p.liquidity?.usd)}`,
-      `Tx 24h: Buys ${p.txns?.h24?.buys ?? 0} / Sells ${p.txns?.h24?.sells ?? 0}`,
+      `Buyer Share: ${result.qual.buyerShare}% | Tx 24h: Buys ${p.txns?.h24?.buys ?? 0} / Sells ${p.txns?.h24?.sells ?? 0}`,
+      `Insight: ${result.qual.insight}`,
       `Pair: ${p.pairAddress ?? "—"} on ${p.chainId ?? "—"}`,
       `Note: Educational only — not financial advice.`,
     ].join("\n");
@@ -227,11 +291,8 @@ export default function FortunexAIApp() {
   }
 
   const p = result?.top;
-  const spark = buildSparkPoints(p?.priceChange);
   const buys = p?.txns?.h24?.buys ?? 0;
   const sells = p?.txns?.h24?.sells ?? 0;
-  const totalTx = buys + sells || 1;
-  const buyerShare = (buys / totalTx) * 100;
 
   return (
     <div style={{ minHeight: "100vh", background: "linear-gradient(#0A1A2F,#111)", color: "#fff", fontFamily: "Inter,system-ui,Arial", paddingBottom: 40 }}>
@@ -242,7 +303,7 @@ export default function FortunexAIApp() {
             <div style={{ width: 40, height: 40, borderRadius: 20, background: "linear-gradient(135deg,#D4AF37,#2E86DE)", display: "grid", placeItems: "center", color: "#000", fontWeight: 800 }}>F</div>
             <div>
               <div style={{ fontWeight: 700, letterSpacing: 1 }}>FORTUNEX AI</div>
-              <div style={{ fontSize: 12, color: "#D4AF37" }}>Intelligent • Educational Analysis</div>
+              <div style={{ fontSize: 12, color: "#D4AF37" }}>Token Intelligence Dashboard</div>
             </div>
           </div>
           <a href="#" onClick={(e) => { e.preventDefault(); setShowUpgrade(true); }} style={{ fontSize: 12, color: "#D4AF37", textDecoration: "underline" }}>Pricing</a>
@@ -289,7 +350,7 @@ export default function FortunexAIApp() {
               <span style={{ background: "#D4AF37", color: "#000", fontWeight: 700, fontSize: 12, borderRadius: 8, padding: "2px 8px" }}>
                 {result.score.label}
               </span>
-              <span style={{ fontSize: 12, color: "#D4AF37cc" }}>Score: {result.score.total}/100</span>
+              <span style={{ fontSize: 12, color: "#D4AF37cc" }}>Raw Score: {result.score.total}/100</span>
               {p?.pairAddress && (
                 <a href={`https://dexscreener.com/${p.chainId}/${p.pairAddress}`} target="_blank" rel="noreferrer" style={{ marginLeft: "auto", fontSize: 12, color: "#2E86DE" }}>
                   View on Dexscreener ↗
@@ -302,8 +363,29 @@ export default function FortunexAIApp() {
               )}
             </div>
 
+            {/* AI Insight + Fortune Score */}
+            <div style={{ marginTop: 12, background: "#111", border: "1px solid #222", borderRadius: 12, padding: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ background: "#D4AF37", color: "#000", fontWeight: 700, borderRadius: 8, padding: "2px 8px" }}>
+                  Fortune Score: {result.qual.fortune}/100
+                </span>
+                <span style={{ fontSize: 12, color: "#D4AF37cc" }}>{result.qual.mood} • Buyer Share {result.qual.buyerShare}%</span>
+              </div>
+
+              {/* Sub-score bars */}
+              <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+                <Bar label="Stability" value={result.qual.stability} />
+                <Bar label="Growth"    value={result.qual.growth} />
+                <Bar label="Momentum"  value={result.qual.momentum} />
+              </div>
+
+              <div style={{ marginTop: 10, fontSize: 14, color: "#eee" }}>
+                <b>AI Insight:</b> {result.qual.insight}
+              </div>
+            </div>
+
             {/* Sparkline */}
-            <div style={{ marginTop: 10 }}>
+            <div style={{ marginTop: 12 }}>
               <Sparkline points={buildSparkPoints(p?.priceChange)} height={50} />
               <div style={{ fontSize: 12, color: "#D4AF37aa", marginTop: 4 }}>
                 1h: {pct(p?.priceChange?.h1)} • 6h: {pct(p?.priceChange?.h6)} • 24h: {pct(p?.priceChange?.h24)}
@@ -316,7 +398,6 @@ export default function FortunexAIApp() {
               <Stat label="Liquidity" value={`$${k(p?.liquidity?.usd)}`} />
               <Stat label="Vol 24h" value={`$${k(p?.volume?.h24)}`} />
               <Stat label="Tx 24h" value={`${buys} buys / ${sells} sells`} />
-              <Stat label="Buyer Share" value={`${(buyerShare).toFixed(1)}%`} />
               <Stat label="Pair Age" value={fmtDate(p?.pairCreatedAt)} />
             </div>
 
@@ -423,7 +504,22 @@ function Stat({ label, value }) {
   );
 }
 
-function Sparkline({ points = [], height = 40 }) {
+function Bar({ label, value }) {
+  const pct = Math.round((Number(value) / 10) * 100);
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 4 }}>
+        <span style={{ color: "#D4AF37cc" }}>{label}</span>
+        <span>{Number(value).toFixed(1)}/10</span>
+      </div>
+      <div style={{ height: 10, background: "#1b1b1b", borderRadius: 8, overflow: "hidden", border: "1px solid #333" }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: "linear-gradient(90deg,#2E86DE,#D4AF37)" }} />
+      </div>
+    </div>
+  );
+}
+
+function Sparkline({ points = [], height = 50 }) {
   if (!points.length) return null;
   const d = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
   const up = points[points.length - 1].y < points[0].y; // lower y = higher value
@@ -433,4 +529,4 @@ function Sparkline({ points = [], height = 40 }) {
       <path d={d} fill="none" stroke={stroke} strokeWidth="2" />
     </svg>
   );
-                       }
+                                  }
