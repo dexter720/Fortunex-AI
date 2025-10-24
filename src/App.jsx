@@ -1,11 +1,10 @@
 import React from "react";
 
 /* ============================================
-   FORTUNEX AI v5.3 — Full App.jsx
+   FORTUNEX AI v5.3 (CDN build) — Full App.jsx
    - Analyzer • Top Movers (auto-refresh + status dot) • Favorites • Pricing
-   - Public promo codes (auto-apply on Enter + toast)
-   - Gift Pro modal (?pro=1 share link)
-   - Share as Image (watermark) + Export PDF (Pro)
+   - Public promo codes + Gift Pro modal
+   - Share as Image (watermark) + Export PDF (Pro, CDN libs)
    - Compare Mode (Pro)
    - Robust Dexscreener fetch (link / raw address / search)
 ============================================ */
@@ -177,9 +176,8 @@ function moodColor(mood) {
   if (mood === "Bearish") return "#E74C3C";
   return "#F1C40F"; // Neutral
 }
-
 function freshnessColor(ts) {
-  if (!ts) return "#999"; // unknown
+  if (!ts) return "#999";
   const age = Date.now() - ts;
   if (age < FRESH_GREEN_MS) return "#2ECC71";
   if (age < FRESH_YELLOW_MS) return "#F1C40F";
@@ -193,43 +191,27 @@ const LSK_DAILY = (d = new Date()) =>
 const LSK_HISTORY = "fx_history";
 const LSK_FAVS = "fx_favorites";
 
-// ---- Lazy loaders for html2canvas / jsPDF (NPM or CDN) ----
+/* ---------- CDN-only lazy loaders (no imports) ---------- */
 async function ensureLibs() {
-  let html2canvas = window.html2canvas;
-  let jsPDFCtor = window.jspdf?.jsPDF;
-
-  try {
-    if (!html2canvas) {
-      const mod = await import(/* @vite-ignore */ "html2canvas").catch(()=>null);
-      html2canvas = mod?.default || mod;
-    }
-  } catch {}
-  try {
-    if (!jsPDFCtor) {
-      const mod = await import(/* @vite-ignore */ "jspdf").catch(()=>null);
-      jsPDFCtor = mod?.jsPDF || mod?.default?.jsPDF;
-    }
-  } catch {}
-
   async function injectOnce(src, check) {
     if (check()) return;
-    await new Promise((resolve,reject)=>{
+    await new Promise((resolve, reject) => {
       const s = document.createElement("script");
       s.src = src; s.async = true;
       s.onload = resolve;
-      s.onerror = ()=> reject(new Error("CDN load failed: "+src));
+      s.onerror = () => reject(new Error("CDN load failed: " + src));
       document.head.appendChild(s);
     });
   }
-  if (!html2canvas) {
-    await injectOnce("https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js", ()=> !!window.html2canvas);
-    html2canvas = window.html2canvas;
-  }
-  if (!jsPDFCtor) {
-    await injectOnce("https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js", ()=> !!window.jspdf?.jsPDF);
-    jsPDFCtor = window.jspdf.jsPDF;
-  }
-  return { html2canvas, jsPDF: jsPDFCtor };
+  await injectOnce(
+    "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js",
+    () => !!window.html2canvas
+  );
+  await injectOnce(
+    "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js",
+    () => !!(window.jspdf && window.jspdf.jsPDF)
+  );
+  return { html2canvas: window.html2canvas, jsPDF: window.jspdf.jsPDF };
 }
 
 /* =======================
@@ -912,7 +894,7 @@ export default function FortunexAIApp() {
         )}
       </main>
 
-      {/* Upgrade Modal (with promo input) */}
+      {/* Upgrade Modal */}
       {showUpgrade && (
         <div style={{ position:"fixed", inset:0, display:"grid", placeItems:"center", background:"rgba(0,0,0,.6)", backdropFilter:"blur(2px)" }}>
           <div style={{ width:"92%", maxWidth:420, background:"#0A1A2F", border:"1px solid #D4AF37", borderRadius:16, padding:16 }}>
@@ -962,8 +944,8 @@ export default function FortunexAIApp() {
               Share this link with a friend. When they open it, their device will unlock Pro:
             </div>
             <div style={{ display:"flex", gap:8, marginTop:10, flexWrap:"wrap" }}>
-              <input value={giftLink} readOnly style={{ flex:1, minWidth:240, background:"#111", border:"1px solid #2E86DE55", color:"#fff", borderRadius:8, padding:"8px 10px" }} />
-              <button onClick={()=>{ navigator.clipboard?.writeText(giftLink); showToast("🔗 Gift link copied"); }} style={{ border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:8, padding:"8px 12px" }}>
+              <input value={window.location.origin + window.location.pathname + "?pro=1"} readOnly style={{ flex:1, minWidth:240, background:"#111", border:"1px solid #2E86DE55", color:"#fff", borderRadius:8, padding:"8px 10px" }} />
+              <button onClick={()=>{ const gl = window.location.origin + window.location.pathname + "?pro=1"; navigator.clipboard?.writeText(gl); showToast("🔗 Gift link copied"); }} style={{ border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:8, padding:"8px 12px" }}>
                 Copy
               </button>
             </div>
@@ -1074,4 +1056,4 @@ function CompareTable({ a, b }) {
       ))}
     </div>
   );
-                           }
+     }
