@@ -1,17 +1,13 @@
 import React from "react";
 
 /* ============================================
-   FORTUNEX AI v5.2 — Public Promo + Gift
-   - Pricing tab with promo input (auto-apply on Enter + toast)
-   - Upgrade modal with promo input
-   - Gift Pro modal (shareable ?pro=1 link)
-   - v5 features kept:
-     • Share as Image (watermark)
-     • Export PDF (Pro)
-     • Tabs: Analyzer • Top Movers • Favorites • Pricing
-     • Compare Mode (Pro)
-     • AI Insight + Fortune Score
-     • Robust fetch: link / raw address / search
+   FORTUNEX AI v5.3 — Full App.jsx
+   - Analyzer • Top Movers (auto-refresh + status dot) • Favorites • Pricing
+   - Public promo codes (auto-apply on Enter + toast)
+   - Gift Pro modal (?pro=1 share link)
+   - Share as Image (watermark) + Export PDF (Pro)
+   - Compare Mode (Pro)
+   - Robust Dexscreener fetch (link / raw address / search)
 ============================================ */
 
 // ---- Stripe Payment Links (replace with your live links) ----
@@ -25,9 +21,15 @@ const PROMOS = {
   VIPFREE:   "https://buy.stripe.com/test_FREEFIRST",  // free first month
 };
 
-// ---- Dexscreener helpers ----
+// ---- Dexscreener API ----
 const DS_API = "https://api.dexscreener.com/latest/dex/";
 
+// ---- Auto-refresh config for Top Movers ----
+const REFRESH_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const FRESH_GREEN_MS  = 5  * 60 * 1000;     // <5m = green
+const FRESH_YELLOW_MS = 20 * 60 * 1000;     // 5–20m = yellow, else red
+
+/* ------------ Input parsing + fetch helpers ------------ */
 function parseDexInput(raw) {
   try {
     const txt = raw.trim();
@@ -81,7 +83,7 @@ async function fetchMovers(chain = "solana", sortKey = "pct") {
     .slice(0, 25);
 }
 
-// ---- utils ----
+/* ------------------- utils ------------------- */
 const k = (n = 0, d = 2) => {
   const x = Number(n) || 0;
   if (Math.abs(x) >= 1e9) return (x / 1e9).toFixed(d) + "B";
@@ -176,6 +178,14 @@ function moodColor(mood) {
   return "#F1C40F"; // Neutral
 }
 
+function freshnessColor(ts) {
+  if (!ts) return "#999"; // unknown
+  const age = Date.now() - ts;
+  if (age < FRESH_GREEN_MS) return "#2ECC71";
+  if (age < FRESH_YELLOW_MS) return "#F1C40F";
+  return "#E74C3C";
+}
+
 // ---- storage keys ----
 const LSK_PRO = "fx_isPro";
 const LSK_DAILY = (d = new Date()) =>
@@ -222,18 +232,26 @@ async function ensureLibs() {
   return { html2canvas, jsPDF: jsPDFCtor };
 }
 
-// ---- Main App ----
+/* =======================
+   Main App Component
+======================= */
 export default function FortunexAIApp() {
   const [tab, setTab] = React.useState("analyze"); // analyze | movers | favs | pricing
 
+  // Analyzer state
   const [link, setLink] = React.useState("");
   const [result, setResult] = React.useState(null);
   const [loading, setLoading] = React.useState(false);
+
+  // Modals / UX
   const [showUpgrade, setShowUpgrade] = React.useState(false);
   const [compareOpen, setCompareOpen] = React.useState(false);
   const [compareLink, setCompareLink] = React.useState("");
   const [compareRes, setCompareRes] = React.useState(null);
+  const [giftOpen, setGiftOpen] = React.useState(false);
+  const [toast, setToast] = React.useState(null);
 
+  // Plan / persistence
   const [isPro, setIsPro] = React.useState(() => {
     try { return JSON.parse(localStorage.getItem(LSK_PRO) || "false"); }
     catch { return false; }
@@ -252,16 +270,17 @@ export default function FortunexAIApp() {
   const [mSort, setMSort] = React.useState("pct");
   const [movers, setMovers] = React.useState([]);
   const [mLoading, setMLoading] = React.useState(false);
+  const [lastRefresh, setLastRefresh] = React.useState(null);
+  const [autoRefresh, setAutoRefresh] = React.useState(true);
 
-  // Promo / gift UI
+  // Pricing / promo
   const [coupon, setCoupon] = React.useState("");
-  const [couponModal, setCouponModal] = React.useState(false); // reuse upgrade modal
-  const [giftOpen, setGiftOpen] = React.useState(false);
-  const [toast, setToast] = React.useState(null);
 
+  // Misc
   const FREE_LIMIT = 2;
   const cardRef = React.useRef(null);
 
+  /* -------- lifecycle -------- */
   // Auto-upgrade from Stripe (?pro=1)
   React.useEffect(() => {
     const p = new URLSearchParams(window.location.search);
@@ -274,21 +293,30 @@ export default function FortunexAIApp() {
     }
   }, []);
 
-  // Load movers when tab opens
+  // Load movers on tab open / filter change
+  const loadMovers = React.useCallback(async () => {
+    setMLoading(true);
+    const list = await fetchMovers(mChain, mSort);
+    setMovers(list);
+    setMLoading(false);
+    setLastRefresh(Date.now());
+  }, [mChain, mSort]);
+
   React.useEffect(() => {
     if (tab !== "movers") return;
-    let isMounted = true;
-    (async () => {
-      setMLoading(true);
-      const list = await fetchMovers(mChain, mSort);
-      if (isMounted) {
-        setMovers(list);
-        setMLoading(false);
-      }
-    })();
-    return () => { isMounted = false; };
-  }, [tab, mChain, mSort]);
+    let alive = true;
+    (async () => { if (alive) await loadMovers(); })();
+    return () => { alive = false; };
+  }, [tab, mChain, mSort, loadMovers]);
 
+  // Auto-refresh interval
+  React.useEffect(() => {
+    if (tab !== "movers" || !autoRefresh) return;
+    const id = setInterval(() => { loadMovers(); }, REFRESH_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [tab, autoRefresh, loadMovers]);
+
+  /* -------- local helpers -------- */
   const getCount = () => {
     try { return parseInt(localStorage.getItem(LSK_DAILY()) || "0", 10) || 0; }
     catch { return 0; }
@@ -297,7 +325,6 @@ export default function FortunexAIApp() {
     const n = getCount() + 1;
     localStorage.setItem(LSK_DAILY(), String(n));
   };
-
   function toggleFav(id) {
     const next = favs.includes(id) ? favs.filter((x) => x !== id) : [...favs, id];
     setFavs(next);
@@ -309,12 +336,10 @@ export default function FortunexAIApp() {
     setHistory(next);
     localStorage.setItem(LSK_HISTORY, JSON.stringify(next));
   }
-
   function showToast(msg, ms = 1800) {
     setToast(msg);
     setTimeout(() => setToast(null), ms);
   }
-
   function applyPromo(codeRaw) {
     const code = (codeRaw || "").trim().toUpperCase();
     if (!code) return;
@@ -326,12 +351,12 @@ export default function FortunexAIApp() {
       showToast("❌ Invalid code");
     }
   }
-
   const giftLink = React.useMemo(() => {
     const base = window.location.origin + window.location.pathname;
     return `${base}?pro=1`;
   }, []);
 
+  /* -------- core actions -------- */
   async function analyze() {
     if (!isPro && getCount() >= FREE_LIMIT) { setShowUpgrade(true); return; }
     setLoading(true); setResult(null);
@@ -476,6 +501,7 @@ export default function FortunexAIApp() {
     showToast("📄 PDF saved");
   }
 
+  /* -------- render -------- */
   const p = result?.top;
   const mood = result?.qual?.mood || result?.score?.label || "Neutral";
   const moodCol = moodColor(mood);
@@ -673,7 +699,7 @@ export default function FortunexAIApp() {
           </>
         )}
 
-        {/* ----- MOVERS TAB ----- */}
+        {/* ----- MOVERS TAB (auto-refresh) ----- */}
         {tab==="movers" && (
           <div style={{ background:"#0A1A2F", border:"1px solid #D4AF3755", borderRadius:16, padding:16 }}>
             <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
@@ -684,13 +710,42 @@ export default function FortunexAIApp() {
                   <option key={c} value={c}>{c}</option>
                 ))}
               </select>
+
               <label>Sort:</label>
               <select value={mSort} onChange={e=>setMSort(e.target.value)}
                 style={{ background:"#111", color:"#fff", border:"1px solid #2a3b5a", borderRadius:8, padding:"6px 8px" }}>
                 <option value="pct">24h % Change</option>
                 <option value="vol">24h Volume</option>
               </select>
-              <div style={{ marginLeft:"auto", fontSize:12, color:"#D4AF37aa" }}>Auto-refresh when you switch filters</div>
+
+              {/* status pill */}
+              <div style={{ display:"flex", alignItems:"center", gap:6, marginLeft:"auto" }}>
+                <span title={lastRefresh ? `Last refresh: ${new Date(lastRefresh).toLocaleTimeString()}` : "No data yet"}
+                      style={{
+                        width:10, height:10, borderRadius:6,
+                        background: freshnessColor(lastRefresh),
+                        boxShadow:"0 0 8px rgba(0,0,0,.4)"
+                      }} />
+                <span style={{ fontSize:12, color:"#D4AF37aa" }}>
+                  {lastRefresh ? `Updated ${Math.round((Date.now()-lastRefresh)/60000)}m ago` : "Waiting…"}
+                </span>
+              </div>
+
+              {/* controls */}
+              <div style={{ display:"flex", gap:8 }}>
+                <button onClick={loadMovers} disabled={mLoading}
+                  style={{ border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:8, padding:"6px 10px" }}>
+                  {mLoading ? "Refreshing…" : "Refresh now"}
+                </button>
+                <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, border:"1px solid #2a3b5a", borderRadius:8, padding:"6px 10px" }}>
+                  <input type="checkbox" checked={autoRefresh} onChange={e=>setAutoRefresh(e.target.checked)} />
+                  Auto-refresh 10m
+                </label>
+              </div>
+            </div>
+
+            <div style={{ marginTop:6, fontSize:12, color:"#D4AF37aa" }}>
+              Tip: Change <code>REFRESH_INTERVAL_MS</code> at the top to customize auto-refresh.
             </div>
 
             {mLoading && <div style={{ marginTop:12, opacity:.8 }}>Loading movers…</div>}
@@ -763,6 +818,7 @@ export default function FortunexAIApp() {
         {/* ----- PRICING TAB ----- */}
         {tab==="pricing" && (
           <div style={{ display:"grid", gap:16 }}>
+            {/* Hero + Promo */}
             <div style={{ background:"#0A1A2F", border:"1px solid #D4AF3755", borderRadius:16, padding:16, textAlign:"center" }}>
               <div style={{ fontSize:22, fontWeight:800, letterSpacing:.5 }}>Choose your plan</div>
               <div style={{ marginTop:6, color:"#D4AF37aa" }}>Start free. Upgrade anytime. Educational use only.</div>
@@ -780,6 +836,7 @@ export default function FortunexAIApp() {
               </div>
             </div>
 
+            {/* Plans */}
             <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))", gap:12 }}>
               {/* Free */}
               <div style={{ background:"#0A1A2F", border:"1px solid #2a3b5a", borderRadius:16, padding:16 }}>
@@ -836,6 +893,7 @@ export default function FortunexAIApp() {
               </div>
             </div>
 
+            {/* FAQ */}
             <div style={{ background:"#0A1A2F", border:"1px solid #2a3b5a", borderRadius:16, padding:16 }}>
               <div style={{ fontWeight:800, fontSize:18, marginBottom:8 }}>FAQ</div>
               <div style={{ display:"grid", gap:10 }}>
@@ -910,7 +968,7 @@ export default function FortunexAIApp() {
               </button>
             </div>
             <div style={{ marginTop:10, fontSize:12, color:"#D4AF37aa" }}>
-              Tip: You can later replace this with license keys or Stripe-issued gift codes.
+              Tip: Replace this with license keys or Stripe-issued gift codes when you add a backend.
             </div>
           </div>
         </div>
@@ -1016,4 +1074,4 @@ function CompareTable({ a, b }) {
       ))}
     </div>
   );
-}
+                           }
