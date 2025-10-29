@@ -1,1222 +1,664 @@
-import React from "react";
+// src/App.jsx — Fortunex AI v6.5 (Pro + Growth + Legal + Referrals)
+// Single-file app. Paste over your current App.jsx, save, deploy.
+// Replace STRIPE_* with real links later. Optional: set FORM_ENDPOINT.
 
-/* =========================================================
-   FORTUNEX AI v5.4-cdn  —  Full App.jsx (copy–paste)
-   - Analyzer • Top Movers (auto-refresh + status) • Favorites • Pricing
-   - Share as Image (watermark) • Export PDF (Pro, CDN libs)
-   - Compare Mode (Pro)
-   - Install PWA button
-   - Newsletter capture (Form or mailto fallback)
-   - Share to X button
-   - Terms & Privacy modals
-   - Dexscreener smart fetch (link / raw address / search)
-   ========================================================= */
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-// ---- Stripe / Checkout (replace with your links) ----
-export const STRIPE_PRO_LINK   = "https://buy.stripe.com/test_PRO_LINK";
-export const STRIPE_ELITE_LINK = "https://buy.stripe.com/test_ELITE_LINK";
-
-// ---- Public promo codes → discounted checkout links (optional) ----
-const PROMOS = {
-  // Example: "FORTUNE20": "https://buy.stripe.com/discounted_link"
+/* ---------- PRICING (8-sum alignment) ---------- */
+const PRICING = {
+  monthly: { label: "Pro Monthly", price: "€7.10" , cents: 710  },
+  annual:  { label: "Pro Annual" , price: "€71.00", cents: 7100 },
+  lifetime:{ label: "Lifetime"   , price: "€107.00", cents: 10700 },
 };
 
-// ---- Newsletter & contact (no backend required) ----
-// If you later create a Formspree / Google Form, paste POST URL here.
-// Leave empty to use mailto fallback.
-const NEWSLETTER_FORM_URL = ""; // e.g. "https://formspree.io/f/xxxxxxx"
-const CONTACT_EMAIL = "hello@yourdomain.com";
+/* ---------- STRIPE (placeholders; swap to real Payment Links) ---------- */
+export const STRIPE_MONTHLY = "https://buy.stripe.com/test-monthly_710";
+export const STRIPE_ANNUAL  = "https://buy.stripe.com/test-annual_7100";
+export const STRIPE_LIFE    = "https://buy.stripe.com/test-lifetime_10700";
 
-// ---- Dexscreener API ----
-const DS_API = "https://api.dexscreener.com/latest/dex/";
+/* ---------- NEWSLETTER (Formspree endpoint; leave "" to auto mailto) ---------- */
+const FORM_ENDPOINT = ""; // e.g. "https://formspree.io/f/abcdqwer"
 
-// ---- Top Movers auto-refresh config ----
-const REFRESH_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
-const FRESH_GREEN_MS  = 5  * 60 * 1000;
-const FRESH_YELLOW_MS = 20 * 60 * 1000;
+/* ---------- CONFIG ---------- */
+const FREE_DAILY_CAP = 2;
+const TRIAL_DAYS = 3;
+const LS_KEY   = "fortunex-usage";
+const LS_TRIAL = "fortunex-trial-since";
+const LS_WATCH = "fortunex-watchlist";
+const LS_REF   = "fortunex-ref-code";
+const LS_REFSRC= "fortunex-ref-source"; // who referred this device
 
-/* ----------------- helpers: parse / fetch ----------------- */
-function parseDexInput(raw) {
-  try {
-    const txt = raw.trim();
-    if (/^[0-9a-zA-Z]{32,}$/.test(txt)) return { kind: "raw", id: txt };
-    const url = new URL(txt);
-    const host = url.hostname.toLowerCase();
-    const parts = url.pathname.split("/").filter(Boolean);
-    if (host.includes("dexscreener.com") && parts.length >= 2) {
-      return { kind: "dex", chain: parts[0], id: parts[1] };
-    }
-    return { kind: "search", q: txt };
-  } catch {
-    if (/^[0-9a-zA-Z]{32,}$/.test(raw.trim())) return { kind: "raw", id: raw.trim() };
-    return { kind: "search", q: raw.trim() };
+/* ---------- Dexscreener REST ---------- */
+const DS_API = "https://api.dexscreener.com/latest/dex/search?q=";
+
+/* ---------- Helpers ---------- */
+const clamp = (v, min, max) => Math.max(min, Math.min(max, v ?? 0));
+const pct = (v) => `${(v * 100).toFixed(1)}%`;
+const fmt = (n) =>
+  typeof n === "number"
+    ? (n >= 1_000_000
+        ? `${(n / 1_000_000).toFixed(2)}M`
+        : n >= 1_000
+          ? `${(n / 1_000).toFixed(1)}k`
+          : `${n.toFixed(2)}`)
+    : "—";
+const euro = (n) => (typeof n === "number" ? `€${fmt(n)}`.replace("€-", "-€") : "—");
+const todayKey = () => { const d=new Date(); return `${d.getUTCFullYear()}-${d.getUTCMonth()+1}-${d.getUTCDate()}`; };
+const getUsage = () => { try { const raw = JSON.parse(localStorage.getItem(LS_KEY) || "{}"); return raw[todayKey()] ?? 0; } catch { return 0; } };
+const addUsage = () => { const k=todayKey(); const raw=JSON.parse(localStorage.getItem(LS_KEY)||"{}"); raw[k]=(raw[k]??0)+1; localStorage.setItem(LS_KEY, JSON.stringify(raw)); };
+const daysSince = (ts) => Math.floor((Date.now()-ts)/(1000*60*60*24));
+const ensureTrialStart = () => { if(!localStorage.getItem(LS_TRIAL)) localStorage.setItem(LS_TRIAL, String(Date.now())); };
+const trialRemainingDays = () => { const ts=Number(localStorage.getItem(LS_TRIAL)||0); if(!ts) return TRIAL_DAYS; const left=TRIAL_DAYS-daysSince(ts); return left>0?left:0; };
+const classifyBias = (score) => score>=70?{t:"Bullish",color:"#16a34a"}:score>=45?{t:"Neutral",color:"#f59e0b"}:{t:"Bearish",color:"#dc2626"};
+const readWatch = () => { try { return JSON.parse(localStorage.getItem(LS_WATCH) || "[]"); } catch { return []; } };
+const writeWatch = (list) => localStorage.setItem(LS_WATCH, JSON.stringify(list.slice(0, 12)));
+const getParam = (k) => new URLSearchParams(window.location.search).get(k) || "";
+
+/* ---------- Referrals (no backend) ---------- */
+function ensureRefCode() {
+  let code = localStorage.getItem(LS_REF);
+  if (!code) {
+    code = Math.random().toString(36).slice(2, 8).toUpperCase(); // 6 chars
+    localStorage.setItem(LS_REF, code);
+  }
+  return code;
+}
+function captureRefSource() {
+  const src = getParam("ref");
+  if (src && !localStorage.getItem(LS_REFSRC)) {
+    localStorage.setItem(LS_REFSRC, src);
   }
 }
+function buildCheckoutURL(base, planName) {
+  // Attach client_reference_id for Stripe analytics; pass promo code if desired
+  const url = new URL(base);
+  const refSrc  = localStorage.getItem(LS_REFSRC) || "";
+  const myRef   = localStorage.getItem(LS_REF) || "";
+  const cid = `plan=${encodeURIComponent(planName)}|ref=${refSrc || "none"}|my=${myRef}`;
+  url.searchParams.set("client_reference_id", cid);
 
-async function fetchDexSmart(parsed) {
-  const tries = [];
-  if (parsed?.kind === "dex")  tries.push(`${DS_API}pairs/${parsed.chain}/${parsed.id}`);
-  if (parsed?.kind === "raw")  tries.push(`${DS_API}tokens/${parsed.id}`);
-  tries.push(`${DS_API}search?q=${encodeURIComponent(parsed?.q || parsed?.id || "")}`);
-  for (const u of tries) {
-    try {
-      const r = await fetch(u, { headers: { Accept: "application/json" } });
-      if (!r.ok) continue;
-      const d = await r.json();
-      if (d?.pairs?.length) return d;
-    } catch {}
-  }
-  return null;
+  // OPTIONAL: if you enable promotion code "REF8" in Stripe, this will prefill it
+  // url.searchParams.set("prefilled_promo_code", "REF8");
+
+  return url.toString();
 }
 
-async function fetchMovers(chain = "solana", sortKey = "pct") {
-  const r = await fetch(`${DS_API}search?q=${encodeURIComponent(chain)}`, { headers: { Accept: "application/json" } });
-  if (!r.ok) return [];
-  const d = await r.json();
-  const arr = Array.isArray(d?.pairs) ? d.pairs : [];
-  const minLiq = 20000, minVol = 20000;
-  const filtered = arr.filter(p => (p?.liquidity?.usd ?? 0) >= minLiq && (p?.volume?.h24 ?? 0) >= minVol);
-  if (sortKey === "vol") {
-    return filtered.sort((a,b)=> (b.volume?.h24 ?? 0) - (a.volume?.h24 ?? 0)).slice(0, 25);
+/* ---------- WHY + SCORE + CONFIDENCE ---------- */
+function buildAnalysis(ds) {
+  const pros=[], cons=[], flags=[];
+  const ch = { h1:Number(ds?.priceChange?.h1??0), h6:Number(ds?.priceChange?.h6??0), h24:Number(ds?.priceChange?.h24??0) };
+  const buyRatio = Number(ds?.buyerVsSeller?.buyRatio ?? 0);
+  const tx24 = Number(ds?.txns24h?.buys ?? 0) + Number(ds?.txns24h?.sells ?? 0);
+  const vol24 = Number(ds?.volume?.h24 ?? 0);
+  const liq   = Number(ds?.liquidity?.usd ?? 0) || Number(ds?.liquidity?.base ?? 0);
+  const mcap  = Number(ds?.fdv ?? ds?.marketCap ?? 0);
+  const url   = ds?.url;
+  const ageDays = ds?.pairCreatedAt ? Math.floor((Date.now()-new Date(ds.pairCreatedAt).getTime())/(1000*60*60*24)) : null;
+  const renounced = !!ds?.info?.isOwnershipRenounced;
+  const mintDisabled = !!ds?.info?.mintAuthorityDisabled || !!ds?.info?.isMintable === false;
+
+  if (liq >= 150_000) pros.push("Strong liquidity pool supports smoother execution.");
+  else if (liq >= 40_000) pros.push("Adequate liquidity for typical retail entries.");
+  else { cons.push("Low liquidity may cause slippage and exit risk."); flags.push("Slippage/exit risk"); }
+
+  if (vol24 >= 1_000_000) pros.push("High 24h volume indicating active interest.");
+  else if (vol24 < 50_000) cons.push("Thin 24h volume; may be illiquid outside peak hours.");
+
+  if (tx24 >= 2000) pros.push("Heavy transaction count; strong market participation.");
+  else if (tx24 < 100) cons.push("Low transaction count; weak participation.");
+
+  if (ch.h24 >= 20) pros.push("Strong 24h price momentum.");
+  if (ch.h6 >= 10)  pros.push("Short-term uptrend visible in last 6h.");
+  if (ch.h24 <= -15) { cons.push("Down 24h significantly; momentum risk."); flags.push("Momentum dump risk"); }
+  if (ch.h1 <= -7 && ch.h24 > 0) cons.push("Sharp 1h pullback; watch for continuation or reversal.");
+
+  if (buyRatio >= 0.55) pros.push(`Buyer share ${Math.round(buyRatio*100)}% (demand bias).`);
+  if (buyRatio <= 0.45) cons.push(`Buyer share only ${Math.round(buyRatio*100)}% (supply pressure).`);
+
+  if (ageDays!=null) {
+    if (ageDays >= 60) pros.push("Mature pair age (trust/price discovery).");
+    else if (ageDays <= 2) { cons.push("Very new pair; heightened rug/scam risk."); flags.push("New pair risk"); }
   }
-  return filtered
-    .sort((a,b)=>{
-      const ap = Math.abs(a?.priceChange?.h24 ?? 0);
-      const bp = Math.abs(b?.priceChange?.h24 ?? 0);
-      if (bp !== ap) return bp - ap;
-      return (b.volume?.h24 ?? 0) - (a.volume?.h24 ?? 0);
-    })
-    .slice(0, 25);
+  if (renounced) pros.push("Ownership renounced (reduced admin risk).");
+  else cons.push("Ownership not renounced.");
+  if (mintDisabled) pros.push("Mint authority disabled (limited supply inflation).");
+
+  if (mcap > 0 && mcap < 10_000_000) pros.push("Low cap with room for upside if traction holds.");
+  if (mcap >= 100_000_000) cons.push("Large market cap; upside may be slower.");
+
+  let raw=50;
+  raw += liq>=150_000?12: liq>=40_000?6:-8;
+  raw += vol24>=1_000_000?10: vol24>=100_000?5:-6;
+  raw += tx24>=2000?8: tx24>=300?3:-5;
+  raw += ch.h24>=20?7: ch.h24<=-15?-8:0;
+  raw += buyRatio>=0.55?5: buyRatio<=0.45?-4:0;
+  raw += ageDays!=null?(ageDays>=60?5: ageDays<=2?-6:0):0;
+  raw += renounced?4:-2;
+  raw += mintDisabled?3:0;
+  raw = clamp(raw,0,100);
+
+  let inputs=0,present=0;
+  [liq,vol24,tx24,ch.h1,ch.h6,ch.h24,buyRatio,mcap,ageDays??0].forEach(v=>{inputs++; if(Number.isFinite(v)) present++;});
+  const completeness = present/inputs;
+  const volPenalty = Math.max(0, Math.abs(ch.h1)-5)/30;
+  let confidence = clamp(raw * (0.6 + 0.4*completeness) * (1 - volPenalty), 0, 100);
+
+  const bias = classifyBias(raw);
+  let rationale = bias.t==="Bullish"
+    ? "Setup leans favorable: liquidity & participation are solid with positive momentum. Consider staged entries and strict risk caps."
+    : bias.t==="Neutral"
+      ? "Mixed signals: watch liquidity and near-term momentum. Consider waiting for confirmation or tighter stops."
+      : "Risk-heavy profile: weak participation/liquidity or negative momentum. Best skipped unless a clear catalyst emerges.";
+
+  let action = { title:"Wait for retest", detail:"Neutral read. Let price confirm with sustained buys and volume." };
+  if (bias.t==="Bullish" && ch.h1<=-3 && ch.h24>10) action = { title:"Buy the dip (laddered)", detail:"24h uptrend with healthy pullback. Scale in across 2–3 entries." };
+  else if (bias.t==="Bullish" && ch.h1>6)          action = { title:"Wait for cooldown", detail:"1h overheated. Look for consolidation or a 5–10% pullback." };
+  else if (bias.t==="Bearish" && ch.h24<-15)       action = { title:"Avoid / Protect capital", detail:"Momentum down and participation weak. Preserve cash for better setups." };
+  else if (bias.t!=="Bearish" && ch.h24>30)        action = { title:"Trail profits / Reduce risk", detail:"Large 24h gain. Consider trailing stops or partial take-profit." };
+
+  return { pros, cons, flags, bias, raw, confidence, rationale, action, url };
 }
 
-/* ----------------- generic utils ----------------- */
-const k = (n = 0, d = 2) => {
-  const x = Number(n) || 0;
-  if (Math.abs(x) >= 1e9) return (x / 1e9).toFixed(d) + "B";
-  if (Math.abs(x) >= 1e6) return (x / 1e6).toFixed(d) + "M";
-  if (Math.abs(x) >= 1e3) return (x / 1e3).toFixed(d) + "k";
-  return x.toFixed(d);
-};
-const pct = (num) => (num == null ? "—" : `${Number(num).toFixed(2)}%`);
-const fmtDate = (ms) => (ms ? new Date(ms).toLocaleDateString() : "—");
-const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+/* ---------- Minimal Hash Router ---------- */
+function getRoute() { return (window.location.hash || "#/").replace(/^#/, ""); }
 
-function scoreFrom(pair) {
-  if (!pair) return { total: 50, label: "Neutral" };
-  const liq = pair?.liquidity?.usd ?? 0;
-  const vol = pair?.volume?.h24 ?? 0;
-  const buys = pair?.txns?.h24?.buys ?? 0;
-  const sells = pair?.txns?.h24?.sells ?? 0;
-  const change = pair?.priceChange?.h24 ?? 0;
-  const base = Math.log10(liq + vol + 1) * 10 + (buys - sells) + change;
-  const total = Math.round(clamp(base, 0, 100));
-  const label = total > 50 ? "Bullish" : total < 50 ? "Bearish" : "Neutral";
-  return { total, label };
-}
+/* ---------- UI ---------- */
+export default function App() {
+  const [route,setRoute]=useState(getRoute());     // "#/", "#/terms", "#/privacy", "#/referrals"
+  const [q,setQ]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState("");
+  const [pair,setPair]=useState(null); // { ds, an }
+  const [used,setUsed]=useState(0);
+  const [showUpgrade,setShowUpgrade]=useState(false);
+  const [watch,setWatch]=useState(readWatch());
+  const [showNL,setShowNL]=useState(false);
+  const [email,setEmail]=useState("");
+  const [nlMsg,setNlMsg]=useState("");
+  const [installEvt,setInstallEvt]=useState(null);   // PWA install event
 
-function analyzeQualities(pair) {
-  if (!pair) {
-    return {
-      stability: 5, growth: 5, momentum: 5,
-      fortune: 50, mood: "Neutral", buyerShare: 50,
-      insight: "No live data found. Try a full Dexscreener link or a known pair address."
-    };
-  }
-  const liq = Number(pair?.liquidity?.usd ?? 0);
-  const vol24 = Number(pair?.volume?.h24 ?? 0);
-  const ch1 = Number(pair?.priceChange?.h1 ?? 0);
-  const ch6 = Number(pair?.priceChange?.h6 ?? 0);
-  const ch24 = Number(pair?.priceChange?.h24 ?? 0);
-  const buys = Number(pair?.txns?.h24?.buys ?? 0);
-  const sells= Number(pair?.txns?.h24?.sells ?? 0);
-  const buyerShare = (buys + sells) ? buys / (buys + sells) : 0.5;
+  const [myRef, setMyRef] = useState(ensureRefCode());
+  const refLink = useMemo(()=>{
+    const u = new URL(window.location.href);
+    u.searchParams.set("ref", myRef);
+    return u.toString();
+  }, [myRef]);
 
-  let stability = (Math.log10(liq + 1) * 1.6) - (Math.min(Math.abs(ch24), 50) / 25);
-  stability = clamp(stability, 0, 10);
+  // print/PDF ref
+  const printRef = useRef(null);
 
-  let growth = (Math.log10(vol24 + 1) * 1.6) + (clamp(ch24, -20, 20) / 10);
-  growth = clamp(growth, 0, 10);
+  useEffect(()=>{ ensureTrialStart(); setUsed(getUsage()); captureRefSource(); },[]);
+  const trialLeft = trialRemainingDays();
 
-  const bias = (buyerShare - 0.5) * 20;
-  let momentum = 5 + bias * 0.6 + clamp((ch1 + ch6) / 4, -5, 5);
-  momentum = clamp(momentum, 0, 10);
+  // PWA install handler
+  useEffect(()=>{
+    const onPrompt=(e)=>{ e.preventDefault(); setInstallEvt(e); };
+    window.addEventListener("beforeinstallprompt", onPrompt);
+    return ()=>window.removeEventListener("beforeinstallprompt", onPrompt);
+  },[]);
 
-  const fortune = clamp(Math.round((stability * 3 + growth * 3 + momentum * 4) * 2.5), 0, 100);
-  const mood = fortune > 75 ? "Bullish" : fortune < 35 ? "Bearish" : "Neutral";
+  // Hash route
+  useEffect(()=>{
+    const onHash=()=>setRoute(getRoute());
+    window.addEventListener("hashchange", onHash);
+    return ()=>window.removeEventListener("hashchange", onHash);
+  },[]);
 
-  const reasons = [];
-  if (buyerShare > 0.58) reasons.push("strong buyer advantage");
-  if (buyerShare < 0.42) reasons.push("seller pressure");
-  if (ch24 > 8) reasons.push("solid 24h price gain");
-  if (ch24 < -8) reasons.push("24h price weakness");
-  if (liq > 500000) reasons.push("healthy liquidity");
-  if (vol24 > 300000) reasons.push("active trading volume");
-  if (!reasons.length) reasons.push("mixed signals");
-
-  return {
-    stability: Math.round(stability * 10) / 10,
-    growth: Math.round(growth * 10) / 10,
-    momentum: Math.round(momentum * 10) / 10,
-    fortune,
-    mood,
-    buyerShare: Math.round(buyerShare * 1000) / 10,
-    insight: `${mood} bias — ${reasons.slice(0, 3).join(", ")}.`
-  };
-}
-
-function buildSparkPoints(pc = {}) {
-  const seq = [
-    { t: 0, v: 0 },
-    { t: 1, v: Number(pc.h1 ?? 0) },
-    { t: 6, v: Number(pc.h6 ?? 0) },
-    { t: 24, v: Number(pc.h24 ?? 0) },
-  ];
-  const ys = seq.map((p) => p.v);
-  const min = Math.min(...ys);
-  const max = Math.max(...ys);
-  const range = max - min || 1;
-  return seq.map((p) => ({ x: (p.t / 24) * 100, y: 100 - ((p.v - min) / range) * 100 }));
-}
-
-function moodColor(mood) {
-  if (mood === "Bullish") return "#2ECC71";
-  if (mood === "Bearish") return "#E74C3C";
-  return "#F1C40F";
-}
-function freshnessColor(ts) {
-  if (!ts) return "#999";
-  const age = Date.now() - ts;
-  if (age < FRESH_GREEN_MS) return "#2ECC71";
-  if (age < FRESH_YELLOW_MS) return "#F1C40F";
-  return "#E74C3C";
-}
-
-// ---- storage keys ----
-const LSK_PRO = "fx_isPro";
-const LSK_DAILY = (d = new Date()) => `fx_daily_${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
-const LSK_HISTORY = "fx_history";
-const LSK_FAVS = "fx_favorites";
-
-/* ---------- CDN-only lazy loaders (no imports) ---------- */
-async function ensureLibs() {
-  async function injectOnce(src, check) {
-    if (check()) return;
-    await new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = src; s.async = true;
-      s.onload = resolve;
-      s.onerror = () => reject(new Error("CDN load failed: " + src));
-      document.head.appendChild(s);
-    });
-  }
-  await injectOnce(
-    "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js",
-    () => !!window.html2canvas
-  );
-  await injectOnce(
-    "https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js",
-    () => !!(window.jspdf && window.jspdf.jsPDF)
-  );
-  return { html2canvas: window.html2canvas, jsPDF: window.jspdf.jsPDF };
-}
-
-/* =======================
-   Main App
-======================= */
-export default function FortunexAIApp() {
-  const [tab, setTab] = React.useState("analyze"); // analyze | movers | favs | pricing
-
-  // Analyzer
-  const [link, setLink] = React.useState("");
-  const [result, setResult] = React.useState(null);
-  const [loading, setLoading] = React.useState(false);
-
-  // Modals / UX
-  const [showUpgrade, setShowUpgrade] = React.useState(false);
-  const [compareOpen, setCompareOpen] = React.useState(false);
-  const [compareLink, setCompareLink] = React.useState("");
-  const [compareRes, setCompareRes] = React.useState(null);
-  const [giftOpen, setGiftOpen] = React.useState(false);
-  const [toast, setToast] = React.useState(null);
-
-  // Terms / Privacy / Newsletter
-  const [showTerms, setShowTerms] = React.useState(false);
-  const [showPrivacy, setShowPrivacy] = React.useState(false);
-  const [showNewsletter, setShowNewsletter] = React.useState(false);
-
-  // PWA install
-  const [pwaEvt, setPwaEvt] = React.useState(null);
-  const [canInstall, setCanInstall] = React.useState(false);
-
-  // Plan / persistence
-  const [isPro, setIsPro] = React.useState(() => {
-    try { return JSON.parse(localStorage.getItem(LSK_PRO) || "false"); }
-    catch { return false; }
-  });
-  const [history, setHistory] = React.useState(() => {
-    try { return JSON.parse(localStorage.getItem(LSK_HISTORY) || "[]"); }
-    catch { return []; }
-  });
-  const [favs, setFavs] = React.useState(() => {
-    try { return JSON.parse(localStorage.getItem(LSK_FAVS) || "[]"); }
-    catch { return []; }
-  });
-
-  // Movers
-  const [mChain, setMChain] = React.useState("solana");
-  const [mSort, setMSort] = React.useState("pct");
-  const [movers, setMovers] = React.useState([]);
-  const [mLoading, setMLoading] = React.useState(false);
-  const [lastRefresh, setLastRefresh] = React.useState(null);
-  const [autoRefresh, setAutoRefresh] = React.useState(true);
-
-  // Pricing / promo
-  const [coupon, setCoupon] = React.useState("");
-
-  // Misc
-  const FREE_LIMIT = 2;
-  const cardRef = React.useRef(null);
-
-  /* -------- lifecycle -------- */
-  // Auto-unlock Pro if redirected back with ?pro=1 (MVP)
-  React.useEffect(() => {
-    const p = new URLSearchParams(window.location.search);
-    if (p.get("pro") === "1") {
-      localStorage.setItem(LSK_PRO, "true");
-      setIsPro(true);
-      const url = window.location.origin + window.location.pathname;
-      window.history.replaceState({}, "", url);
-      showToast("✅ Pro unlocked on this device");
-    }
-  }, []);
-
-  // PWA install prompt
-  React.useEffect(() => {
-    function handler(e) {
-      e.preventDefault();
-      setPwaEvt(e);
-      setCanInstall(true);
-    }
-    window.addEventListener("beforeinstallprompt", handler);
-    return () => window.removeEventListener("beforeinstallprompt", handler);
-  }, []);
-  async function installApp() {
-    if (!pwaEvt) return;
-    pwaEvt.prompt();
-    const { outcome } = await pwaEvt.userChoice;
-    if (outcome === "accepted") showToast("📲 App installed");
-    setPwaEvt(null);
-    setCanInstall(false);
+  // parse input
+  function parseQuery(raw){
+    try{ const t=raw.trim(); if(!t) return ""; if(/^https?:\/\//i.test(t)) return t; return encodeURIComponent(t); }
+    catch{ return ""; }
   }
 
-  // Movers loader
-  const loadMovers = React.useCallback(async () => {
-    setMLoading(true);
-    const list = await fetchMovers(mChain, mSort);
-    setMovers(list);
-    setMLoading(false);
-    setLastRefresh(Date.now());
-  }, [mChain, mSort]);
+  async function analyze(){
+    setErr("");
+    const key=parseQuery(q);
+    if(!key){ setErr("Paste a valid DEX link, token address or name."); return; }
 
-  React.useEffect(() => {
-    if (tab !== "movers") return;
-    let alive = true;
-    (async () => { if (alive) await loadMovers(); })();
-    return () => { alive = false; };
-  }, [tab, mChain, mSort, loadMovers]);
+    if (trialLeft===0 && getUsage()>=FREE_DAILY_CAP) { setShowUpgrade(true); return; }
 
-  React.useEffect(() => {
-    if (tab !== "movers" || !autoRefresh) return;
-    const id = setInterval(() => { loadMovers(); }, REFRESH_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [tab, autoRefresh, loadMovers]);
-
-  /* -------- local helpers -------- */
-  const getCount = () => {
-    try { return parseInt(localStorage.getItem(LSK_DAILY()) || "0", 10) || 0; }
-    catch { return 0; }
-  };
-  const incCount = () => {
-    const n = getCount() + 1;
-    localStorage.setItem(LSK_DAILY(), String(n));
-  };
-  function toggleFav(id) {
-    const next = favs.includes(id) ? favs.filter((x) => x !== id) : [...favs, id];
-    setFavs(next);
-    localStorage.setItem(LSK_FAVS, JSON.stringify(next));
-  }
-  function pushHistory(entry) {
-    const max = isPro ? 1000 : 10;
-    const next = [entry, ...history].slice(0, max);
-    setHistory(next);
-    localStorage.setItem(LSK_HISTORY, JSON.stringify(next));
-  }
-  function showToast(msg, ms = 1800) {
-    setToast(msg);
-    setTimeout(() => setToast(null), ms);
-  }
-  function applyPromo(codeRaw) {
-    const code = (codeRaw || "").trim().toUpperCase();
-    if (!code) return;
-    const link = PROMOS[code];
-    if (link) {
-      showToast(`✅ ${code} applied — redirecting…`);
-      setTimeout(() => { window.location.href = link; }, 500);
-    } else {
-      showToast("❌ Invalid code");
-    }
-  }
-  const giftLink = React.useMemo(() => {
-    const base = window.location.origin + window.location.pathname;
-    return `${base}?pro=1`;
-  }, []);
-
-  /* -------- core actions -------- */
-  async function analyze() {
-    if (!isPro && getCount() >= FREE_LIMIT) { setShowUpgrade(true); return; }
-    setLoading(true); setResult(null);
-
-    const parsed = parseDexInput(link);
-    const data = await fetchDexSmart(parsed);
-    const top = data?.pairs?.[0] ?? null;
-
-    const baseScore = scoreFrom(top);
-    const qual = analyzeQualities(top);
-    const res = { parsed, top, score: baseScore, qual };
-    setResult(res);
-    setLoading(false);
-
-    if (!isPro) incCount();
-    if (top) {
-      pushHistory({
-        id: top.pairAddress ?? parsed?.id ?? link,
-        symbol: `${top?.baseToken?.symbol ?? "?"}/${top?.quoteToken?.symbol ?? "?"}`,
-        price: Number(top?.priceUsd ?? 0),
-        score: baseScore.total,
-        label: qual.mood,
-        ts: Date.now(),
-        link: `https://dexscreener.com/${top.chainId ?? parsed?.chain}/${top.pairAddress ?? parsed?.id ?? ""}`,
-      });
-    }
+    setBusy(true);
+    try{
+      const res = await fetch(DS_API + key);
+      const data = await res.json();
+      const best = (data?.pairs || [])[0];
+      if(!best) throw new Error("No matching pair found.");
+      const an = buildAnalysis(best);
+      setPair({ ds: best, an });
+      addUsage(); setUsed(getUsage());
+    }catch(e){ setErr(e.message || "Failed to analyze."); setPair(null); }
+    finally{ setBusy(false); }
   }
 
-  async function runCompare() {
-    if (!isPro) { setShowUpgrade(true); return; }
-    setCompareRes(null);
-    const p = parseDexInput(compareLink);
-    const d = await fetchDexSmart(p);
-    const t = d?.pairs?.[0] ?? null;
-    const baseScore = scoreFrom(t);
-    const qual = analyzeQualities(t);
-    setCompareRes({ parsed: p, top: t, score: baseScore, qual });
+  function addToWatch(){
+    if(!pair) return;
+    const symbol = `${pair.ds?.baseToken?.symbol}/${pair.ds?.quoteToken?.symbol}`;
+    const url = pair.an.url;
+    const list = readWatch().filter(x=>x.url!==url);
+    list.unshift({symbol,url});
+    writeWatch(list); setWatch(list);
   }
+  function removeFromWatch(url){ const list=readWatch().filter(x=>x.url!==url); writeWatch(list); setWatch(list); }
 
-  function copySummary() {
-    if (!result?.top) return;
-    const p = result.top;
-    const s = [
-      `Fortunex AI — Analysis`,
-      `${p.baseToken?.symbol}/${p.quoteToken?.symbol} • Price $${Number(p.priceUsd ?? 0).toFixed(6)}`,
-      `Fortune Score: ${result.qual.fortune}/100 (${result.qual.mood})`,
-      `Subs — Stability ${result.qual.stability}/10 • Growth ${result.qual.growth}/10 • Momentum ${result.qual.momentum}/10`,
-      `24h Change: ${pct(p.priceChange?.h24)} | Vol24h: $${k(p.volume?.h24)} | Liq: $${k(p.liquidity?.usd)}`,
-      `Buyer Share: ${result.qual.buyerShare}% | Tx 24h: Buys ${p.txns?.h24?.buys ?? 0} / Sells ${p.txns?.h24?.sells ?? 0}`,
-      `Insight: ${result.qual.insight}`,
-      `Pair: ${p.pairAddress ?? "—"} on ${p.chainId ?? "—"}`,
-      `Note: Educational only — not financial advice.`,
-      `Generated by Fortunex AI — fortunex.app`,
-    ].join("\n");
-    navigator.clipboard?.writeText(s);
-    showToast("📋 Summary copied");
-  }
-
-  function shareToX() {
-    if (!result?.top) { showToast("Analyze a token first"); return; }
-    const p = result.top;
+  function copySummary(){
+    if(!pair) return;
+    const ds=pair.ds, an=pair.an;
     const text =
-      `Fortunex AI: ${p.baseToken?.symbol}/${p.quoteToken?.symbol}\n` +
-      `Fortune ${result.qual.fortune}/100 (${result.qual.mood}) • ` +
-      `24h ${pct(p?.priceChange?.h24)} • Vol $${k(p?.volume?.h24)} • Liq $${k(p?.liquidity?.usd)}\n` +
-      `Educational only — not financial advice.`;
-    const url = `https://twitter.com/intent/tweet?text=${encodeURIComponent(text)}&url=${encodeURIComponent(window.location.origin)}`;
-    window.open(url, "_blank");
+`FORTUNEX AI — Quick Read
+Pair: ${ds?.baseToken?.symbol}/${ds?.quoteToken?.symbol}
+Bias: ${an.bias.t} • Score ${Math.round(an.raw)}/100 • Confidence ${Math.round(an.confidence)}%
+Liquidity: ${euro(Number(ds?.liquidity?.usd ?? 0))} • Vol24: ${euro(Number(ds?.volume?.h24 ?? 0))}
+Tx24: ${ds?.txns24h?.buys ?? 0} buys / ${ds?.txns24h?.sells ?? 0} sells • Buyer Share: ${ds?.buyerVsSeller?.buyRatio!=null ? pct(ds.buyerVsSeller.buyRatio):"—"}
+Action: ${an.action.title} — ${an.action.detail}
+(Ed. only — not financial advice)`;
+    navigator.clipboard?.writeText(text);
   }
 
-  async function submitNewsletter(email) {
-    const em = (email || "").trim();
-    if (!/^\S+@\S+\.\S+$/.test(em)) { showToast("Enter a valid email"); return; }
+  // PRINT / PDF
+  function exportPDF(){
+    if(!pair) return;
+    const win = window.open("", "_blank");
+    const html = printRef.current?.innerHTML || "";
+    win.document.write(`<html><head><title>Fortunex Report</title>
+      <style>
+        body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,'Helvetica Neue',sans-serif;background:#0b1220;color:#e5e7eb;margin:0;padding:24px;}
+        .card{background:#0c162a;border:1px solid #1f2a44;border-radius:12px;padding:16px;margin-bottom:12px;}
+        .h{font-weight:800}
+        .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+        .pill{display:inline-block;padding:3px 8px;border-radius:999px;border:1px solid #334155}
+      </style></head><body>${html}</body></html>`);
+    win.document.close();
+    win.focus();
+    win.print();
+  }
 
-    if (NEWSLETTER_FORM_URL) {
-      try {
-        const r = await fetch(NEWSLETTER_FORM_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: em, source: "fortunex-ai" })
-        });
-        if (!r.ok) throw new Error("bad status");
-        showToast("✅ Subscribed");
-        setShowNewsletter(false);
-        return;
-      } catch {
-        showToast("Could not reach form — opening mail…");
+  async function submitNewsletter(e){
+    e.preventDefault();
+    setNlMsg("");
+    if(!email || !/.+@.+\..+/.test(email)) { setNlMsg("Enter a valid email."); return; }
+    try{
+      if (FORM_ENDPOINT) {
+        const r = await fetch(FORM_ENDPOINT, { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify({ email }) });
+        if(!r.ok) throw new Error("Submit failed");
+        setNlMsg("Thanks! You're on the list.");
+      } else {
+        window.location.href = `mailto:newsletter@fortunex.ai?subject=Subscribe&body=${encodeURIComponent(email)}`;
+        setNlMsg("Opening mail app… If nothing opens, email newsletter@fortunex.ai");
       }
-    }
-    const m = `mailto:${CONTACT_EMAIL}?subject=Subscribe%20me%20to%20Fortunex%20AI&body=Email:%20${encodeURIComponent(em)}`;
-    window.location.href = m;
-    setShowNewsletter(false);
+      setEmail("");
+    }catch{ setNlMsg("Could not submit right now."); }
   }
 
-  // Share as Image (PNG) with watermark
-  async function shareImage() {
-    if (!result?.top || !cardRef.current) return;
-    const { html2canvas } = await ensureLibs();
-    const node = cardRef.current;
-
-    const canvas = await html2canvas(node, { backgroundColor: "#0A1A2F" });
-    const ctx = canvas.getContext("2d");
-
-    const barH = Math.max(36, Math.round(canvas.height * 0.05));
-    ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(0, canvas.height - barH, canvas.width, barH);
-
-    const r = Math.min(18, Math.round(barH * 0.4));
-    ctx.beginPath(); ctx.arc(20 + r, canvas.height - barH/2, r, 0, Math.PI * 2);
-    ctx.fillStyle = "#D4AF37"; ctx.fill();
-    ctx.fillStyle = "#000"; ctx.font = `${Math.round(r*1.2)}px Inter, Arial`;
-    ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText("F", 20 + r, canvas.height - barH/2 + 1);
-
-    ctx.fillStyle = "#FFFFFF";
-    ctx.font = `bold ${Math.max(12, Math.round(barH*0.4))}px Inter, Arial`;
-    ctx.textAlign = "left";
-    ctx.fillText("Generated by Fortunex AI — Educational use only • fortunex.app", 20 + r*2 + 16, canvas.height - barH/2 + 1);
-
-    const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/png", 0.95));
-    const file = new File([blob], "fortunex-analysis.png", { type: "image/png" });
-
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try {
-        await navigator.share({
-          title: "Fortunex AI Analysis",
-          text: "Generated by Fortunex AI — Educational use only.",
-          files: [file],
-        });
-        return;
-      } catch {}
-    }
-
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = "fortunex-analysis.png";
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-    showToast("📸 Image saved");
+  function triggerInstall(){
+    if(installEvt){ installEvt.prompt(); installEvt.userChoice?.then(()=>setInstallEvt(null)); }
   }
 
-  // Export PDF (Pro)
-  async function sharePDF() {
-    if (!isPro) { setShowUpgrade(true); return; }
-    if (!result?.top || !cardRef.current) return;
+  const badge = useMemo(()=> pair ? classifyBias(pair.an.raw) : null, [pair]);
 
-    const { html2canvas, jsPDF } = await ensureLibs();
-    const node = cardRef.current;
-    const canvas = await html2canvas(node, { backgroundColor: "#0A1A2F" });
-    const imgData = canvas.toDataURL("image/png");
+  /* ---------- UI Pieces ---------- */
+  const Label = ({children}) => (
+    <span style={{background:"#0c111b",border:"1px solid #1f2937",color:"#cbd5e1",fontSize:12,padding:"3px 8px",borderRadius:999}}>{children}</span>
+  );
+  const btnLink = { display:"grid", placeItems:"center", background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, textDecoration:"none", color:"#cbd5e1", fontWeight:700 };
+  const btnSm    = { background:"#0b1220", color:"#e5e7eb", border:"1px solid #1f2937", borderRadius:10, padding:"6px 10px", fontWeight:700, cursor:"pointer" };
+  const btnGhost = { background:"transparent", color:"#e5e7eb", border:"1px solid #334155", borderRadius:10, padding:"6px 10px", cursor:"pointer" };
+  const btnGrad  = { background:"linear-gradient(135deg,#60a5fa,#22c55e)", color:"#0b1220", border:"none", borderRadius:12, padding:"10px 16px", fontWeight:800, cursor:"pointer" };
 
-    const pdf = new jsPDF({ unit: "pt", format: "a4", compress: true });
-    const pageW = pdf.internal.pageSize.getWidth();
-    const pageH = pdf.internal.pageSize.getHeight();
-    const margin = 24;
-
-    pdf.setFont("helvetica", "bold");
-    pdf.setFontSize(16);
-    pdf.text("Fortunex AI — Educational Analysis Report", margin, 40);
-
-    pdf.setFont("helvetica", "normal");
-    pdf.setFontSize(11);
-    pdf.text(`Generated: ${new Date().toLocaleString()}`, margin, 58);
-
-    const imgW = pageW - margin*2;
-    const ratio = canvas.height / canvas.width;
-    const imgH = Math.min(pageH - 160, imgW * ratio);
-    pdf.addImage(imgData, "PNG", margin, 80, imgW, imgH, "", "FAST");
-
-    const yFooter = pageH - 36;
-    pdf.setFillColor(0,0,0); pdf.rect(margin, yFooter - 20, pageW - margin*2, 26, "F");
-    pdf.setTextColor(255,255,255); pdf.setFont("helvetica", "bold");
-    pdf.text("Generated by Fortunex AI — Educational use only • fortunex.app", margin + 12, yFooter);
-
-    pdf.save("fortunex-report.pdf");
-    showToast("📄 PDF saved");
-  }
-
-  /* -------- render prep -------- */
-  const p = result?.top;
-  const mood = result?.qual?.mood || result?.score?.label || "Neutral";
-  const moodCol = moodColor(mood);
-  const buys = p?.txns?.h24?.buys ?? 0;
-  const sells = p?.txns?.h24?.sells ?? 0;
-
-  /* ===================== render ===================== */
-  return (
-    <div style={{ minHeight: "100vh", background: "linear-gradient(#0A1A2F,#111)", color: "#fff", fontFamily: "Inter,system-ui,Arial", paddingBottom: 40 }}>
-      {/* Toast */}
-      {toast && (
-        <div style={{
-          position:"fixed", top:16, left:"50%", transform:"translateX(-50%)",
-          background:"#0A1A2F", border:"1px solid #D4AF37", color:"#fff",
-          padding:"8px 12px", borderRadius:12, zIndex:100
-        }}>{toast}</div>
-      )}
-
-      {/* Header */}
-      <header style={{ position: "sticky", top: 0, backdropFilter: "blur(4px)", borderBottom: "1px solid #D4AF37", background: "#0A1A2Fcc", zIndex: 10 }}>
-        <div style={{ maxWidth: 1024, margin: "0 auto", padding: 12, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div style={{ width: 40, height: 40, borderRadius: 20, background: "linear-gradient(135deg,#D4AF37,#2E86DE)", display: "grid", placeItems: "center", color: "#000", fontWeight: 800 }}>F</div>
-            <div>
-              <div style={{ fontWeight: 700, letterSpacing: 1 }}>FORTUNEX AI</div>
-              <div style={{ fontSize: 12, color: "#D4AF37" }}>Token Intelligence Dashboard</div>
-            </div>
+  /* ---------- Route Screens ---------- */
+  function ScreenHome() {
+    return (
+      <>
+        {/* Trial Banner */}
+        {trialLeft>0 && (
+          <div style={{maxWidth:1100, margin:"0 auto 10px", padding:"10px 12px", border:"1px solid #f59e0b55", borderRadius:10, background:"#0a1a2f"}}>
+            <strong style={{color:"#fbbf24"}}>Trial:</strong> You have <strong>{trialLeft} day{trialLeft>1?"s":""}</strong> left. Full features—no card required.
           </div>
+        )}
 
-          {/* header actions (Install / Newsletter / Gift / Upgrade) */}
-          <div style={{ display:"flex", gap:10, alignItems:"center" }}>
-            {canInstall && (
-              <button onClick={installApp}
-                style={{ fontSize:12, border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", padding:"6px 10px", borderRadius:10 }}>
-                Install App
-              </button>
-            )}
-            <a href="#" onClick={(e)=>{e.preventDefault(); setShowNewsletter(true);}}
-               style={{ fontSize:12, color:"#2E86DE", textDecoration:"underline" }}>
-              Newsletter
-            </a>
-            <a href="#" onClick={(e) => { e.preventDefault(); setGiftOpen(true); }} style={{ fontSize: 12, color: "#2E86DE", textDecoration: "underline" }}>🎁 Gift Pro</a>
-            <a href="#" onClick={(e) => { e.preventDefault(); setShowUpgrade(true); }} style={{ fontSize: 12, color: "#D4AF37", textDecoration: "underline" }}>Upgrade</a>
-          </div>
-        </div>
-
-        {/* Tabs */}
-        <div style={{ maxWidth: 1024, margin: "0 auto", padding: "8px 12px", display: "flex", gap: 8, flexWrap:"wrap" }}>
-          {[
-            ["analyze","Analyzer"],
-            ["movers","Top Movers"],
-            ["favs","Favorites"],
-            ["pricing","Pricing"],
-          ].map(([key,label]) => (
-            <button key={key} onClick={()=>setTab(key)}
-              style={{
-                background: tab===key ? "#162844" : "transparent",
-                border: "1px solid #2a3b5a",
-                color: "#fff",
-                borderRadius: 12, padding: "8px 12px", fontWeight: 600
-              }}>
-              {label}
-            </button>
-          ))}
-        </div>
-      </header>
-
-      {/* Main */}
-      <main style={{ maxWidth: 1024, margin: "0 auto", padding: 12, display: "grid", gap: 12 }}>
-
-        {/* ----- ANALYZER ----- */}
-        {tab==="analyze" && (
-          <>
-            <div style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
-              <div style={{ fontSize: 14, marginBottom: 8 }}>Paste DEX link / address / name</div>
+        {/* Input + Watchlist */}
+        <div style={{maxWidth:1100, margin:"0 auto", padding:"0 16px 16px"}}>
+          <div style={{display:"grid", gridTemplateColumns:"2fr 1fr", gap:16}}>
+            {/* Input */}
+            <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
+              <div style={{fontWeight:700, marginBottom:8}}>Paste DEX link / address / name</div>
               <input
-                value={link}
-                onChange={(e) => setLink(e.target.value)}
-                placeholder="https://dexscreener.com/solana/PAIR  or  7xKXJ8K...  or  BONK"
-                style={{ width: "100%", background: "#111", border: "1px solid #D4AF3722", color: "#fff", borderRadius: 12, padding: "10px 12px" }}
+                placeholder="https://dexscreener.com/solana/xxxx or CA/name"
+                value={q} onChange={(e)=>setQ(e.target.value)}
+                style={{width:"100%", background:"#0a1220", color:"#e5e7eb", border:"1px solid #1f2a44", borderRadius:12, padding:"12px 14px", outline:"none"}}
               />
-              <div style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12, flexWrap: "wrap" }}>
-                <button onClick={analyze} disabled={loading}
-                  style={{ background: "linear-gradient(90deg,#D4AF37,#2E86DE)", color: "#000", fontWeight: 700, border: "none", padding: "10px 16px", borderRadius: 12 }}>
-                  {loading ? "Analyzing..." : "Analyze"}
-                </button>
-                {!isPro && <div style={{ fontSize: 12, opacity: 0.8 }}>Free uses today: {Math.min(getCount(), FREE_LIMIT)} / {FREE_LIMIT}</div>}
-                <button onClick={()=> setCompareOpen(true)} style={{ border: "1px solid #2E86DE", color: "#2E86DE", borderRadius: 12, padding: "8px 12px", background: "transparent" }}>
-                  Compare Pair (Pro)
-                </button>
+              <div style={{display:"flex", alignItems:"center", gap:12, marginTop:12}}>
+                <button onClick={analyze} disabled={busy} style={btnGrad}>{busy?"Analyzing…":"Analyze"}</button>
+                <Label>Free uses today: {Math.max(0, FREE_DAILY_CAP - used)} / {FREE_DAILY_CAP}</Label>
               </div>
+              {err && <div style={{marginTop:10, color:"#f87171"}}>{err}</div>}
             </div>
 
-            {result && !result.top && (
-              <div style={{ background: "#311", border: "1px solid #a33", borderRadius: 12, padding: 12 }}>
-                Couldn’t find live data for that input. Try a full Dexscreener link, a raw pair/token address, or a token name.
+            {/* Watchlist */}
+            <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
+              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                <div style={{fontWeight:800}}>Watchlist</div>
+                {pair && <button onClick={addToWatch} style={btnSm}>+ Add current</button>}
               </div>
-            )}
-
-            {result && result.top && (
-              <div ref={cardRef} style={{ background: "#0A1A2F", border: "1px solid #D4AF3755", borderRadius: 16, padding: 16 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                  {p?.info?.imageUrl && <img src={p.info.imageUrl} alt="token" width={32} height={32} style={{ borderRadius: 8, background: "#111" }} />}
-                  <div style={{ fontWeight: 700 }}>
-                    {p ? `${p.baseToken?.symbol ?? "?"}/${p.quoteToken?.symbol ?? "?"}` : "—"}
+              <div style={{marginTop:10, display:"grid", gap:8}}>
+                {watch.length===0 && <div style={{color:"#94a3b8"}}>No saved pairs yet.</div>}
+                {watch.map((w,i)=>(
+                  <div key={w.url+i} style={{display:"flex", justifyContent:"space-between", alignItems:"center", background:"#0a1220", border:"1px solid #1f2a44", borderRadius:10, padding:"8px 10px"}}>
+                    <a href={w.url} target="_blank" rel="noreferrer" style={{textDecoration:"none", color:"#e5e7eb"}}>{w.symbol}</a>
+                    <button onClick={()=>removeFromWatch(w.url)} style={btnGhost}>Remove</button>
                   </div>
-                  <span style={{ border: `1px solid ${moodCol}`, color: moodCol, fontWeight: 700, fontSize: 12, borderRadius: 8, padding: "2px 8px" }}>{mood}</span>
-                  <span style={{ fontSize: 12, color: moodCol }}>Raw Score: {result.score.total}/100</span>
-                  {p?.pairAddress && (
-                    <a href={`https://dexscreener.com/${p.chainId}/${p.pairAddress}`} target="_blank" rel="noreferrer" style={{ marginLeft: "auto", fontSize: 12, color: "#2E86DE" }}>
-                      View on Dexscreener ↗
-                    </a>
-                  )}
-                  {p?.pairAddress && (
-                    <button onClick={() => toggleFav(p.pairAddress)} title="Favorite"
-                      style={{ marginLeft: 8, background: "transparent", border: "1px solid #D4AF37", color: "#D4AF37", borderRadius: 8, padding: "2px 8px" }}>
-                      {favs.includes(p.pairAddress) ? "★" : "☆"}
-                    </button>
-                  )}
-                </div>
-
-                <div style={{ marginTop: 12, background: "#111", border: "1px solid #222", borderRadius: 12, padding: 12 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                    <span style={{ background: "#D4AF37", color: "#000", fontWeight: 700, borderRadius: 8, padding: "2px 8px" }}>
-                      Fortune Score: {result.qual.fortune}/100
-                    </span>
-                    <span style={{ fontSize: 12, color: "#D4AF37cc" }}>
-                      {result.qual.mood} • Buyer Share {result.qual.buyerShare}%
-                    </span>
-                  </div>
-                  <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
-                    <Bar label="Stability" value={result.qual.stability} />
-                    <Bar label="Growth"    value={result.qual.growth} />
-                    <Bar label="Momentum"  value={result.qual.momentum} />
-                  </div>
-                  <div style={{ marginTop: 10, fontSize: 14, color: "#eee" }}>
-                    <b>AI Insight:</b> {result.qual.insight}
-                  </div>
-                </div>
-
-                <div style={{ marginTop: 12 }}>
-                  <Sparkline points={buildSparkPoints(p?.priceChange)} height={50} />
-                  <div style={{ fontSize: 12, color: "#D4AF37aa", marginTop: 4 }}>
-                    1h: {pct(p?.priceChange?.h1)} • 6h: {pct(p?.priceChange?.h6)} • 24h: {pct(p?.priceChange?.h24)}
-                  </div>
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8, marginTop: 12 }}>
-                  <Stat label="Price" value={`$${Number(p?.priceUsd ?? 0).toFixed(6)}`} />
-                  <Stat label="Liquidity" value={`$${k(p?.liquidity?.usd)}`} />
-                  <Stat label="Vol 24h" value={`$${k(p?.volume?.h24)}`} />
-                  <Stat label="Tx 24h" value={`${buys} buys / ${sells} sells`} />
-                  <Stat label="Pair Age" value={fmtDate(p?.pairCreatedAt)} />
-                </div>
-
-                <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                  <button onClick={copySummary} style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #D4AF37", color: "#D4AF37", background: "transparent" }}>
-                    Copy summary
-                  </button>
-                  <button onClick={shareImage} style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #D4AF37", color: "#D4AF37", background: "transparent" }}>
-                    Share as Image
-                  </button>
-                  <button onClick={sharePDF} style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #2E86DE", color: "#2E86DE", background: "transparent" }}>
-                    Export PDF (Pro)
-                  </button>
-                  <button onClick={shareToX}
-                    style={{ borderRadius: 10, padding: "8px 12px", border: "1px solid #1DA1F2", color: "#1DA1F2", background: "transparent" }}>
-                    Share to X
-                  </button>
-                </div>
-
-                <div style={{ marginTop: 10, fontSize: 12, color: "#D4AF37aa" }}>
-                  Educational insights only — Not financial advice.
-                </div>
-              </div>
-            )}
-
-            {/* Compare Modal (Pro) */}
-            {compareOpen && (
-              <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", display: "grid", placeItems: "center", zIndex: 30 }}>
-                <div style={{ width: "94%", maxWidth: 980, background: "#0A1A2F", border: "1px solid #2E86DE", borderRadius: 16, padding: 16 }}>
-                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                    <div style={{ fontWeight: 700 }}>Compare Pair (Pro)</div>
-                    <button onClick={()=>{ setCompareOpen(false); setCompareRes(null); }} style={{ background:"transparent", border:"1px solid #444", color:"#fff", borderRadius:8, padding:"4px 8px" }}>Close</button>
-                  </div>
-                  {!isPro && (
-                    <div style={{ marginTop: 8, background:"#311", border:"1px solid #a33", borderRadius:12, padding:10 }}>
-                      Compare Mode is a Pro feature. Upgrade to unlock.
-                      <div style={{ marginTop:8 }}>
-                        <a href={STRIPE_PRO_LINK} style={{ color:"#2E86DE", textDecoration:"underline" }}>Upgrade now →</a>
-                      </div>
-                    </div>
-                  )}
-                  <div style={{ display:"grid", gap:8, marginTop: 12 }}>
-                    <input value={compareLink} onChange={e=>setCompareLink(e.target.value)} placeholder="Paste second link / address / name"
-                      style={{ width:"100%", background:"#111", border:"1px solid #2E86DE55", color:"#fff", borderRadius:12, padding:"10px 12px" }} />
-                    <button onClick={runCompare} disabled={!isPro} style={{ border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:12, padding:"8px 12px" }}>
-                      Analyze & Compare
-                    </button>
-                  </div>
-
-                  <div style={{ display:"grid", gap:12, gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))", marginTop: 16 }}>
-                    {result?.top && <CompareCard title="Token A" data={result} />}
-                    {compareRes?.top && <CompareCard title="Token B" data={compareRes} />}
-                  </div>
-
-                  {result?.top && compareRes?.top && (
-                    <CompareTable a={result} b={compareRes} />
-                  )}
-                </div>
-              </div>
-            )}
-          </>
-        )}
-
-        {/* ----- MOVERS ----- */}
-        {tab==="movers" && (
-          <div style={{ background:"#0A1A2F", border:"1px solid #D4AF3755", borderRadius:16, padding:16 }}>
-            <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
-              <label>Chain:</label>
-              <select value={mChain} onChange={e=>setMChain(e.target.value)}
-                style={{ background:"#111", color:"#fff", border:"1px solid #2a3b5a", borderRadius:8, padding:"6px 8px" }}>
-                {["solana","ethereum","bsc","base","polygon","arbitrum","avalanche"].map(c=>(
-                  <option key={c} value={c}>{c}</option>
                 ))}
-              </select>
+              </div>
+              <div style={{marginTop:14, borderTop:"1px solid #1f2a44", paddingTop:12}}>
+                <div style={{fontWeight:800, marginBottom:6}}>Invite & Earn</div>
+                <div style={{fontSize:12, color:"#94a3b8"}}>Share your link — we append your code to Stripe as <code>client_reference_id</code>. Enable promo <b>REF8</b> in Stripe to auto-discount.</div>
+                <div style={{display:"grid", gridTemplateColumns:"1fr auto", gap:8, marginTop:8}}>
+                  <input value={refLink} readOnly style={{background:"#0a1220", color:"#e5e7eb", border:"1px solid #1f2a44", borderRadius:10, padding:"8px 10px"}}/>
+                  <button onClick={()=>navigator.clipboard?.writeText(refLink)} style={btnSm}>Copy</button>
+                </div>
+                <div style={{fontSize:12, color:"#94a3b8", marginTop:6}}>
+                  Your code: <b>{myRef}</b> • Referred by: <b>{localStorage.getItem(LS_REFSRC) || "—"}</b>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
 
-              <label>Sort:</label>
-              <select value={mSort} onChange={e=>setMSort(e.target.value)}
-                style={{ background:"#111", color:"#fff", border:"1px solid #2a3b5a", borderRadius:8, padding:"6px 8px" }}>
-                <option value="pct">24h % Change</option>
-                <option value="vol">24h Volume</option>
-              </select>
-
-              {/* status pill */}
-              <div style={{ display:"flex", alignItems:"center", gap:6, marginLeft:"auto" }}>
-                <span title={lastRefresh ? `Last refresh: ${new Date(lastRefresh).toLocaleTimeString()}` : "No data yet"}
-                      style={{
-                        width:10, height:10, borderRadius:6,
-                        background: freshnessColor(lastRefresh),
-                        boxShadow:"0 0 8px rgba(0,0,0,.4)"
-                      }} />
-                <span style={{ fontSize:12, color:"#D4AF37aa" }}>
-                  {lastRefresh ? `Updated ${Math.round((Date.now()-lastRefresh)/60000)}m ago` : "Waiting…"}
+        {/* RESULT + PRINT CONTENT WRAPPER */}
+        <div ref={printRef}>
+        {pair && (
+          <div style={{maxWidth:1100, margin:"0 auto", padding:"0 16px 24px"}}>
+            <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
+              {/* Header */}
+              <div style={{display:"flex", alignItems:"center", gap:12, marginBottom:10, flexWrap:"wrap"}}>
+                <div style={{width:28,height:28,borderRadius:999,background:"#1d4ed833",display:"grid",placeItems:"center"}}>👀</div>
+                <div style={{fontWeight:800}}>{pair.ds?.baseToken?.symbol}/{pair.ds?.quoteToken?.symbol}</div>
+                {badge && (
+                  <span style={{marginLeft:"auto",background:badge.color+"22",color:badge.color,border:`1px solid ${badge.color}66`,padding:"3px 10px",borderRadius:999,fontWeight:700}}>
+                    {badge.t} • Score: {Math.round(pair.an.raw)}/100
+                  </span>
+                )}
+                <span style={{background:"#0b1220",border:"1px solid #1f2937",borderRadius:999,padding:"3px 10px",fontWeight:700}}>
+                  Confidence: {Math.round(pair.an.confidence)}%
                 </span>
               </div>
 
-              {/* controls */}
-              <div style={{ display:"flex", gap:8 }}>
-                <button onClick={loadMovers} disabled={mLoading}
-                  style={{ border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:8, padding:"6px 10px" }}>
-                  {mLoading ? "Refreshing…" : "Refresh now"}
-                </button>
-                <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, border:"1px solid #2a3b5a", borderRadius:8, padding:"6px 10px" }}>
-                  <input type="checkbox" checked={autoRefresh} onChange={e=>setAutoRefresh(e.target.checked)} />
-                  Auto-refresh 10m
-                </label>
+              {/* Bars */}
+              <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12}}>
+                <MetricBar title="Stability" value={stabilityFrom(pair.ds)} />
+                <MetricBar title="Growth" value={growthFrom(pair.ds)} />
+                <MetricBar title="Momentum" value={momentumFrom(pair.ds)} />
               </div>
-            </div>
 
-            <div style={{ marginTop:6, fontSize:12, color:"#D4AF37aa" }}>
-              Tip: change <code>REFRESH_INTERVAL_MS</code> at the top to customize auto-refresh.
-            </div>
+              {/* Why + Action + Flags */}
+              <div style={{display:"grid", gridTemplateColumns:"2fr 1fr", gap:14, marginTop:16}}>
+                <div style={{background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:14}}>
+                  <div style={{fontWeight:800, marginBottom:6}}>Why this verdict?</div>
+                  <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
+                    <ListCard title="Pros" color="#86efac" items={pair.an.pros} empty="No strong positives detected." />
+                    <ListCard title="Cons" color="#fca5a5" items={pair.an.cons} empty="No major red flags detected." />
+                  </div>
+                  <div style={{marginTop:10, padding:10, borderRadius:10, background:"#0b1220", border:"1px solid #1f2937", color:"#cbd5e1"}}>
+                    <strong>AI Insight:</strong> {pair.an.rationale}
+                    <div style={{fontSize:12, color:"#94a3b8", marginTop:6}}>Educational insights only — Not financial advice.</div>
+                  </div>
+                </div>
 
-            {mLoading && <div style={{ marginTop:12, opacity:.8 }}>Loading movers…</div>}
-            {!mLoading && movers.length===0 && (
-              <div style={{ marginTop:12, background:"#311", border:"1px solid #a33", borderRadius:12, padding:10 }}>
-                No movers found for this filter. Try another chain.
-              </div>
-            )}
-
-            <div style={{ marginTop:12, display:"grid", gap:8 }}>
-              {movers.map((x, i)=>(
-                <div key={x?.pairAddress || i} style={{ display:"grid", gridTemplateColumns:"40px 1fr 110px 120px 130px 120px", gap:8, alignItems:"center", background:"#111", border:"1px solid #2a3b5a", borderRadius:12, padding:"8px 10px" }}>
-                  <div style={{ opacity:.8 }}>#{i+1}</div>
-                  <div style={{ display:"flex", alignItems:"center", gap:8, overflow:"hidden" }}>
-                    {x?.info?.imageUrl && <img src={x.info.imageUrl} width={24} height={24} style={{ borderRadius:6 }} />}
-                    <div style={{ whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
-                      {x?.baseToken?.symbol}/{x?.quoteToken?.symbol}
-                      <div style={{ fontSize:11, opacity:.7 }}>{x?.chainId}</div>
+                <div style={{display:"grid", gap:12}}>
+                  <div style={{background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:14}}>
+                    <div style={{fontWeight:800, marginBottom:6}}>Next Action</div>
+                    <div style={{fontWeight:900}}>{pair.an.action.title}</div>
+                    <div style={{color:"#cbd5e1", marginTop:4}}>{pair.an.action.detail}</div>
+                    <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}>
+                      <button onClick={copySummary} style={btnSm}>Copy summary</button>
+                      <a className="clean" href={pair.an.url} target="_blank" rel="noreferrer" style={{...btnSm, textDecoration:"none"}}>Open on DEX</a>
+                      <button onClick={exportPDF} style={btnSm}>Export PDF</button>
                     </div>
                   </div>
-                  <div style={{ color: (x?.priceChange?.h24 ?? 0) >= 0 ? "#2ECC71" : "#E74C3C", fontWeight:700 }}>
-                    {pct(x?.priceChange?.h24)}
-                  </div>
-                  <div>${k(x?.volume?.h24)} Vol</div>
-                  <div>${k(x?.liquidity?.usd)} Liq</div>
-                  <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
-                    <a href={`https://dexscreener.com/${x.chainId}/${x.pairAddress}`} target="_blank" rel="noreferrer" style={{ color:"#2E86DE" }}>Open ↗</a>
-                    <button onClick={()=>{ setTab("analyze"); setLink(`https://dexscreener.com/${x.chainId}/${x.pairAddress}`); }}
-                      style={{ border:"1px solid #D4AF37", color:"#D4AF37", background:"transparent", borderRadius:8, padding:"4px 8px" }}>
-                      Analyze
-                    </button>
+                  <div style={{background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:14}}>
+                    <div style={{fontWeight:800, marginBottom:6}}>Risk Flags</div>
+                    {pair.an.flags.length
+                      ? <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>{pair.an.flags.map((f,i)=>(
+                          <span key={i} style={{background:"#3f1d1d", color:"#fca5a5", border:"1px solid #7f1d1d", padding:"4px 8px", borderRadius:999, fontSize:12}}>{f}</span>
+                        ))}</div>
+                      : <div style={{color:"#94a3b8"}}>No critical flags detected.</div>}
                   </div>
                 </div>
-              ))}
+              </div>
+
+              {/* Stats */}
+              <div style={{display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginTop:16}}>
+                <Stat title="Price (USD)" value={pair.ds?.priceUsd ? `$${Number(pair.ds.priceUsd).toFixed(6)}` : "—"} />
+                <Stat title="Liquidity" value={euro(Number(pair.ds?.liquidity?.usd ?? 0))} />
+                <Stat title="Vol 24h" value={euro(Number(pair.ds?.volume?.h24 ?? 0))} />
+                <Stat title="Tx 24h" value={`${pair.ds?.txns24h?.buys ?? 0} buys / ${pair.ds?.txns24h?.sells ?? 0} sells`} />
+                <Stat title="Buyer Share" value={pair.ds?.buyerVsSeller?.buyRatio!=null ? pct(pair.ds.buyerVsSeller.buyRatio) : "—"} />
+                <Stat title="Pair Age" value={pair.ds?.pairCreatedAt ? new Date(pair.ds.pairCreatedAt).toLocaleDateString() : "—"} />
+                <Stat title="FDV/MC" value={euro(Number(pair.ds?.fdv ?? pair.ds?.marketCap ?? 0))} />
+                <a className="clean" style={btnLink} href={pair.ds?.url} target="_blank" rel="noreferrer">View on DEX</a>
+              </div>
             </div>
           </div>
         )}
+        </div>
 
-        {/* ----- FAVORITES ----- */}
-        {tab==="favs" && (
-          <div style={{ background:"#0A1A2F", border:"1px solid #D4AF3755", borderRadius:16, padding:16 }}>
-            <div style={{ fontWeight:700, marginBottom:8 }}>Favorites</div>
-            {favs.length === 0 && <div style={{ opacity:.8 }}>You haven’t added any favorites yet.</div>}
-            <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-              {favs.map((id)=>(
-                <span key={id} style={{ border:"1px solid #D4AF37", color:"#D4AF37", borderRadius:999, padding:"6px 10px", fontSize:12 }}>
-                  ★ {id.slice(0,6)}…{id.slice(-4)}
-                </span>
-              ))}
+        {/* Pricing */}
+        <div id="pricing" style={{maxWidth:1100, margin:"0 auto", padding:"16px"}}>
+          <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
+            <div style={{fontWeight:800, marginBottom:8}}>Upgrade • Unlock unlimited daily analyses</div>
+            <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12}}>
+              <PlanCard
+                name={PRICING.monthly.label} price={PRICING.monthly.price}
+                cta="Start Monthly"
+                href={buildCheckoutURL(STRIPE_MONTHLY, "monthly")}
+                note={`Your ref: ${myRef}`}
+              />
+              <PlanCard
+                name={PRICING.annual.label}  price={PRICING.annual.price}
+                cta="Start Annual"
+                href={buildCheckoutURL(STRIPE_ANNUAL, "annual")}
+                note={`Your ref: ${myRef}`}
+              />
+              <PlanCard
+                name={PRICING.lifetime.label} price={PRICING.lifetime.price}
+                cta="Buy Lifetime"
+                href={buildCheckoutURL(STRIPE_LIFE, "lifetime")}
+                note={`Your ref: ${myRef}`}
+              />
             </div>
-            {history.length>0 && (
-              <>
-                <div style={{ fontWeight:700, margin:"16px 0 8px" }}>Recent Analyses</div>
-                <div style={{ display:"grid", gap:8 }}>
-                  {history.map((h, i)=>(
-                    <div key={i} style={{ display:"flex", gap:10, alignItems:"center", fontSize:14 }}>
-                      <span style={{ width:64, opacity:.8 }}>{new Date(h.ts).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})}</span>
-                      <span style={{ flex:1 }}>{h.symbol}</span>
-                      <span style={{ opacity:.8 }}>${Number(h.price).toFixed(6)}</span>
-                      <span style={{ background:"#222", border:"1px solid #444", borderRadius:8, padding:"2px 8px" }}>{h.label} {h.score}/100</span>
-                      <a href={h.link} target="_blank" rel="noreferrer" style={{ color:"#2E86DE" }}>Open ↗</a>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* ----- PRICING ----- */}
-        {tab==="pricing" && (
-          <div style={{ display:"grid", gap:16 }}>
-            {/* Hero + Promo */}
-            <div style={{ background:"#0A1A2F", border:"1px solid #D4AF3755", borderRadius:16, padding:16, textAlign:"center" }}>
-              <div style={{ fontSize:22, fontWeight:800, letterSpacing:.5 }}>Choose your plan</div>
-              <div style={{ marginTop:6, color:"#D4AF37aa" }}>Start free. Upgrade anytime. Educational use only.</div>
-              <div style={{ marginTop:8, color:"#2ECC71", fontSize:13 }}>
-                Use code <b>FORTUNE20</b> for 20% off — press <b>Enter</b> to apply
-              </div>
-              <div style={{ marginTop:8, display:"flex", gap:8, justifyContent:"center" }}>
-                <input
-                  value={coupon}
-                  onChange={(e)=>setCoupon(e.target.value)}
-                  onKeyDown={(e)=>{ if (e.key === "Enter") applyPromo(coupon); }}
-                  placeholder="Enter promo code (e.g., FORTUNE20)"
-                  style={{ width:260, background:"#111", border:"1px solid #2a3b5a", color:"#fff", borderRadius:8, padding:"8px 10px", textAlign:"center" }}
-                />
-              </div>
-              <div style={{ marginTop:10 }}>
-                <button onClick={()=>setShowNewsletter(true)} style={{ border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:12, padding:"8px 12px" }}>
-                  Get updates & promos
-                </button>
-              </div>
-            </div>
-
-            {/* Plans */}
-            <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(260px,1fr))", gap:12 }}>
-              {/* Free */}
-              <div style={{ background:"#0A1A2F", border:"1px solid #2a3b5a", borderRadius:16, padding:16 }}>
-                <div style={{ fontWeight:800, fontSize:18 }}>Free</div>
-                <div style={{ fontSize:12, color:"#D4AF37aa" }}>Great for getting started</div>
-                <div style={{ fontSize:24, fontWeight:800, margin:"8px 0" }}>€0<span style={{ fontSize:12, opacity:.8 }}>/mo</span></div>
-                <ul style={{ lineHeight:1.8, fontSize:14, marginTop:6 }}>
-                  <li>• 2 analyses / day</li>
-                  <li>• AI Insight + Fortune Score</li>
-                  <li>• Top Movers (basic)</li>
-                  <li>• Share as Image</li>
-                </ul>
-                <button onClick={()=>setTab("analyze")} style={{ marginTop:12, width:"100%", border:"1px solid #D4AF37", color:"#D4AF37", background:"transparent", borderRadius:12, padding:"10px 12px", fontWeight:700 }}>
-                  Continue Free
-                </button>
-              </div>
-
-              {/* Pro */}
-              <div style={{ background:"#0A1A2F", border:"1px solid #D4AF37", borderRadius:16, padding:16, position:"relative" }}>
-                <span style={{ position:"absolute", top:12, right:12, background:"#D4AF37", color:"#000", fontWeight:800, fontSize:12, borderRadius:999, padding:"4px 8px" }}>POPULAR</span>
-                <div style={{ fontWeight:800, fontSize:18 }}>Pro</div>
-                <div style={{ fontSize:12, color:"#D4AF37aa" }}>For active learners & creators</div>
-                <div style={{ fontSize:24, fontWeight:800, margin:"8px 0" }}>€4.99<span style={{ fontSize:12, opacity:.8 }}>/mo</span></div>
-                <ul style={{ lineHeight:1.8, fontSize:14, marginTop:6 }}>
-                  <li>• Unlimited analyses</li>
-                  <li>• ⚖️ Compare Mode</li>
-                  <li>• 📄 PDF Export (watermarked)</li>
-                  <li>• Enhanced Top Movers</li>
-                  <li>• Priority features</li>
-                </ul>
-                <a href={STRIPE_PRO_LINK} style={{ display:"block", textAlign:"center", marginTop:12, border:"none", background:"linear-gradient(90deg,#D4AF37,#2E86DE)", color:"#000", borderRadius:12, padding:"10px 12px", fontWeight:800, textDecoration:"none" }}>
-                  Upgrade — €4.99/mo
-                </a>
-                <div style={{ textAlign:"center", marginTop:8 }}>
-                  <a href="#" onClick={(e)=>{e.preventDefault(); setGiftOpen(true);}} style={{ color:"#2E86DE", fontSize:12, textDecoration:"underline" }}>
-                    🎁 Gift Pro access to a friend
-                  </a>
-                </div>
-              </div>
-
-              {/* Elite */}
-              <div style={{ background:"#0A1A2F", border:"1px solid #2a3b5a", borderRadius:16, padding:16 }}>
-                <div style={{ fontWeight:800, fontSize:18 }}>Elite</div>
-                <div style={{ fontSize:12, color:"#D4AF37aa" }}>Coming soon</div>
-                <div style={{ fontSize:24, fontWeight:800, margin:"8px 0" }}>TBA</div>
-                <ul style={{ lineHeight:1.8, fontSize:14, marginTop:6, opacity:.7 }}>
-                  <li>• Alerts & watchlists</li>
-                  <li>• Deeper analytics</li>
-                  <li>• Early feature access</li>
-                </ul>
-                <a href={STRIPE_ELITE_LINK} style={{ display:"block", textAlign:"center", marginTop:12, border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:12, padding:"10px 12px", fontWeight:700, textDecoration:"none" }}>
-                  Join waitlist
-                </a>
-              </div>
-            </div>
-
-            {/* FAQ */}
-            <div style={{ background:"#0A1A2F", border:"1px solid #2a3b5a", borderRadius:16, padding:16 }}>
-              <div style={{ fontWeight:800, fontSize:18, marginBottom:8 }}>FAQ</div>
-              <div style={{ display:"grid", gap:10 }}>
-                <QA q="Is this financial advice?" a="No. Fortunex AI is for educational purposes only. It summarizes on-chain market data to help you learn. Always do your own research." />
-                <QA q="What blockchains are supported?" a="We use Dexscreener data — if a pair is listed there, you can analyze it. Start by pasting a full Dexscreener link or pair address." />
-                <QA q="How do I unlock Pro?" a="Tap Upgrade or apply a promo code and complete checkout. After payment, your device can auto-unlock via ?pro=1 during testing (or with webhooks later)." />
-                <QA q="Can I cancel anytime?" a="Yes. You control your subscription via Stripe; cancel with one click." />
-                <QA q="Can I gift Pro?" a="Yes. Use the Gift Pro link to share a one-time unlock link (?pro=1) for now. You can switch to license keys or Stripe coupons later." />
-              </div>
-            </div>
-
-            <div style={{ textAlign:"center", color:"#D4AF37aa", fontSize:12 }}>
-              7-day money-back guarantee. Educational purpose only — Not financial advice.
+            <div style={{fontSize:12, color:"#94a3b8", marginTop:8}}>
+              Prices intentionally sum to 8 (wealth alignment). Educational tool — not financial advice.
             </div>
           </div>
-        )}
-      </main>
+        </div>
+      </>
+    );
+  }
+
+  function ScreenTerms() {
+    return (
+      <LegalShell title="Terms of Use">
+        <p><b>Educational Only.</b> Fortunex AI summarizes publicly available market data for learning purposes. It is <b>not</b> financial advice. You are responsible for your decisions.</p>
+        <p><b>No Warranties.</b> Data may be delayed, incomplete, or inaccurate. The service is provided “as is”.</p>
+        <p><b>Acceptable Use.</b> Don’t scrape, spam, abuse, or reverse-engineer the service. Don’t use outputs to mislead others.</p>
+        <p><b>Subscriptions.</b> Managed by our payment provider (e.g., Stripe). You can cancel anytime through that provider.</p>
+        <p><b>Refunds.</b> If a refund policy is offered, it will appear on the checkout page. Otherwise, purchases are final except where required by law.</p>
+        <p><b>Liability.</b> To the fullest extent permitted by law, we are not liable for any losses or damages arising from your use of the product.</p>
+        <p><b>Contact.</b> newsletter@fortunex.ai</p>
+      </LegalShell>
+    );
+  }
+
+  function ScreenPrivacy() {
+    return (
+      <LegalShell title="Privacy Policy">
+        <p><b>Data We Handle.</b> We process inputs you paste (links/addresses) to fetch public on-chain data. Settings and watchlist are stored in your browser (localStorage).</p>
+        <p><b>Accounts.</b> Our MVP does not require sign-in. Payment and subscription data are handled by our payment provider.</p>
+        <p><b>Analytics.</b> We may use privacy-friendly analytics to improve performance and stability.</p>
+        <p><b>Emails.</b> If you subscribe to our newsletter, your email is stored with our email provider and used only for updates and promotions. You can unsubscribe anytime.</p>
+        <p><b>Security.</b> We use modern hosting and HTTPS, but no system is perfectly secure.</p>
+        <p><b>Contact.</b> newsletter@fortunex.ai</p>
+      </LegalShell>
+    );
+  }
+
+  /* ---------- Layout ---------- */
+  return (
+    <div style={{minHeight:"100vh", background:"#0b1220", color:"#e5e7eb"}}>
+      {/* Top Bar */}
+      <div style={{maxWidth:1100, margin:"0 auto", padding:"18px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", gap:12, flexWrap:"wrap"}}>
+        <div style={{display:"flex", gap:12, alignItems:"center"}}>
+          <div style={{width:38,height:38,borderRadius:999,background:"linear-gradient(135deg,#0EA5E9,#22C55E)",display:"grid",placeItems:"center",fontWeight:800}}>F</div>
+          <div>
+            <div style={{fontWeight:800, letterSpacing:0.5}}>FORTUNEX AI</div>
+            <div style={{fontSize:12, color:"#9ca3af"}}>Token Intelligence Dashboard</div>
+          </div>
+        </div>
+        <div style={{display:"flex", gap:10, alignItems:"center"}}>
+          {installEvt && <button onClick={triggerInstall} style={{ background:"#0b1220", color:"#e5e7eb", border:"1px solid #1f2937", borderRadius:10, padding:"6px 10px", fontWeight:700, cursor:"pointer" }}>Install App</button>}
+          <button onClick={()=>setShowNL(true)} style={{ background:"#0b1220", color:"#e5e7eb", border:"1px solid #1f2937", borderRadius:10, padding:"6px 10px", fontWeight:700, cursor:"pointer" }}>Newsletter</button>
+          <a href="#/" style={{color:"#e5e7eb", textDecoration:"none", fontWeight:700}}>Home</a>
+          <a href="#/terms" style={{color:"#e5e7eb", textDecoration:"none", fontWeight:700}}>Terms</a>
+          <a href="#/privacy" style={{color:"#e5e7eb", textDecoration:"none", fontWeight:700}}>Privacy</a>
+          <a href="#/referrals" onClick={(e)=>{e.preventDefault(); window.location.hash="#/";}} style={{color:"#facc15", textDecoration:"none", fontWeight:700}}>Pricing</a>
+        </div>
+      </div>
+
+      {/* Screens */}
+      {route==="/terms" ? <ScreenTerms/> : route==="/privacy" ? <ScreenPrivacy/> : <ScreenHome/>}
 
       {/* Upgrade Modal */}
       {showUpgrade && (
-        <div style={{ position:"fixed", inset:0, display:"grid", placeItems:"center", background:"rgba(0,0,0,.6)", backdropFilter:"blur(2px)" }}>
-          <div style={{ width:"92%", maxWidth:420, background:"#0A1A2F", border:"1px solid #D4AF37", borderRadius:16, padding:16 }}>
-            <div style={{ textAlign:"center", marginBottom:8 }}>
-              <div style={{ width:48, height:48, margin:"0 auto", borderRadius:24, background:"linear-gradient(135deg,#D4AF37,#2E86DE)", display:"grid", placeItems:"center", color:"#000", fontWeight:800 }}>F</div>
+        <div style={{position:"fixed", inset:0, background:"#0008", display:"grid", placeItems:"center", zIndex:50}}>
+          <div style={{width:"min(92vw,680px)", background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+              <div style={{fontWeight:800}}>Daily limit reached</div>
+              <button onClick={()=>setShowUpgrade(false)} style={{background:"transparent", color:"#e5e7eb", border:"none", fontSize:18}}>✕</button>
             </div>
-            <div style={{ textAlign:"center", fontWeight:700, fontSize:18 }}>Unlock Pro Features</div>
-            <div style={{ textAlign:"center", opacity:.85, fontSize:14, marginTop:6 }}>
-              Unlimited analyses, Compare Mode, and shareable PDF reports.
+            <div style={{marginTop:8, color:"#cbd5e1"}}>
+              You’ve used the free {FREE_DAILY_CAP} analyses for today.{trialLeft>0 ? ` You’re still in a ${TRIAL_DAYS}-day trial (${trialLeft} left).` : ""} Upgrade to continue instantly:
             </div>
-            <ul style={{ marginTop:8, fontSize:14, lineHeight:1.6 }}>
-              <li>• Unlimited daily analyses</li>
-              <li>• ⚖️ Compare mode</li>
-              <li>• 📄 PDF reports</li>
-            </ul>
-            <div style={{ display:"grid", gap:8, marginTop:12 }}>
-              <a href={STRIPE_PRO_LINK} style={{ textAlign:"center", borderRadius:12, padding:"10px 12px", fontWeight:700, background:"linear-gradient(90deg,#D4AF37,#2E86DE)", color:"#000" }}>
-                🔓 Upgrade Now — €4.99/mo
-              </a>
-              <input
-                value={coupon}
-                onChange={(e)=>setCoupon(e.target.value)}
-                onKeyDown={(e)=>{ if (e.key === "Enter") applyPromo(coupon); }}
-                placeholder="Have a promo code? Type and press Enter"
-                style={{ width:"100%", background:"#111", border:"1px solid #2a3b5a", color:"#fff", borderRadius:8, padding:"8px 10px" }}
-              />
-              <button onClick={()=>setShowUpgrade(false)} style={{ textAlign:"center", borderRadius:12, padding:"10px 12px", fontWeight:700, border:"1px solid #D4AF3788", color:"#D4AF37", background:"transparent" }}>
-                Maybe later
-              </button>
-            </div>
-            <div style={{ textAlign:"center", marginTop:6, fontSize:12, color:"#D4AF37aa" }}>
-              Educational purpose only — Not financial advice.
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Gift Pro Modal */}
-      {giftOpen && (
-        <div style={{ position:"fixed", inset:0, display:"grid", placeItems:"center", background:"rgba(0,0,0,.6)" }}>
-          <div style={{ width:"92%", maxWidth:460, background:"#0A1A2F", border:"1px solid #2E86DE", borderRadius:16, padding:16 }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <div style={{ fontWeight:800 }}>🎁 Gift Pro Access</div>
-              <button onClick={()=>setGiftOpen(false)} style={{ background:"transparent", border:"1px solid #444", color:"#fff", borderRadius:8, padding:"4px 8px" }}>Close</button>
-            </div>
-            <div style={{ marginTop:8, color:"#D4AF37aa", fontSize:14 }}>
-              Share this link with a friend. When they open it, their device will unlock Pro:
-            </div>
-            <div style={{ display:"flex", gap:8, marginTop:10, flexWrap:"wrap" }}>
-              <input value={giftLink} readOnly style={{ flex:1, minWidth:240, background:"#111", border:"1px solid #2E86DE55", color:"#fff", borderRadius:8, padding:"8px 10px" }} />
-              <button onClick={()=>{ navigator.clipboard?.writeText(giftLink); showToast("🔗 Gift link copied"); }} style={{ border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:8, padding:"8px 12px" }}>
-                Copy
-              </button>
-            </div>
-            <div style={{ marginTop:10, fontSize:12, color:"#D4AF37aa" }}>
-              Tip: Replace this with license keys or Stripe gift coupons when you add a backend.
+            <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginTop:12}}>
+              <PlanCard name={PRICING.monthly.label} price={PRICING.monthly.price} cta="Start Monthly" href={buildCheckoutURL(STRIPE_MONTHLY, "monthly")}/>
+              <PlanCard name={PRICING.annual.label}  price={PRICING.annual.price}  cta="Start Annual"  href={buildCheckoutURL(STRIPE_ANNUAL, "annual")}/>
+              <PlanCard name={PRICING.lifetime.label}price={PRICING.lifetime.price}cta="Buy Lifetime" href={buildCheckoutURL(STRIPE_LIFE, "lifetime")}/>
             </div>
           </div>
         </div>
       )}
 
       {/* Newsletter Modal */}
-      {showNewsletter && (
-        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.6)", display:"grid", placeItems:"center", zIndex:50 }}>
-          <div style={{ width:"92%", maxWidth:420, background:"#0A1A2F", border:"1px solid #2E86DE", borderRadius:16, padding:16 }}>
-            <div style={{ fontWeight:800, fontSize:18 }}>Join the newsletter</div>
-            <div style={{ marginTop:6, color:"#D4AF37aa", fontSize:14 }}>
-              Get product updates, feature drops and promo codes. No spam.
+      {showNL && (
+        <div style={{position:"fixed", inset:0, background:"#0008", display:"grid", placeItems:"center", zIndex:60}}>
+          <div style={{width:"min(92vw,520px)", background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+              <div style={{fontWeight:800}}>Join the Fortunex Newsletter</div>
+              <button onClick={()=>setShowNL(false)} style={{background:"transparent", color:"#e5e7eb", border:"none", fontSize:18}}>✕</button>
             </div>
-            <div style={{ display:"flex", gap:8, marginTop:12, flexWrap:"wrap" }}>
-              <input id="fx-news-email" type="email" placeholder="you@email.com"
-                style={{ flex:1, minWidth:220, background:"#111", border:"1px solid #2a3b5a", color:"#fff", borderRadius:10, padding:"10px 12px" }} />
-              <button onClick={()=>{
-                  const em = document.getElementById("fx-news-email").value;
-                  submitNewsletter(em);
-                }}
-                style={{ border:"1px solid #2E86DE", color:"#2E86DE", background:"transparent", borderRadius:10, padding:"10px 12px" }}>
+            <div style={{color:"#cbd5e1", marginTop:6}}>Alpha drops, feature updates, and promos. No spam.</div>
+            <form onSubmit={submitNewsletter} style={{display:"flex", gap:8, marginTop:12}}>
+              <input value={email} onChange={(e)=>setEmail(e.target.value)} placeholder="you@email.com"
+                     style={{flex:1, background:"#0a1220", color:"#e5e7eb", border:"1px solid #1f2a44", borderRadius:10, padding:"10px 12px"}}/>
+              <button type="submit" style={{ background:"linear-gradient(135deg,#60a5fa,#22c55e)", color:"#0b1220", border:"none", borderRadius:12, padding:"10px 16px", fontWeight:800, cursor:"pointer" }}>
                 Subscribe
               </button>
-            </div>
-            <div style={{ textAlign:"right", marginTop:10 }}>
-              <button onClick={()=>setShowNewsletter(false)} style={{ border:"1px solid #444", color:"#fff", background:"transparent", borderRadius:10, padding:"6px 10px" }}>
-                Close
-              </button>
-            </div>
+            </form>
+            {nlMsg && <div style={{marginTop:8, color:"#fbbf24"}}>{nlMsg}</div>}
           </div>
         </div>
       )}
 
-      {/* Terms Modal */}
-      {showTerms && (
-        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.7)", display:"grid", placeItems:"center", zIndex:50 }}>
-          <div style={{ width:"94%", maxWidth:720, maxHeight:"80vh", overflow:"auto", background:"#0A1A2F", border:"1px solid #D4AF37", borderRadius:16, padding:16 }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <div style={{ fontWeight:800, fontSize:18 }}>Terms of Use</div>
-              <button onClick={()=>setShowTerms(false)} style={{ border:"1px solid #444", color:"#fff", background:"transparent", borderRadius:10, padding:"6px 10px" }}>Close</button>
-            </div>
-            <div style={{ marginTop:10, color:"#ddd", lineHeight:1.6, fontSize:14 }}>
-              <p><b>Educational Only.</b> Fortunex AI provides summaries of publicly available market data for learning purposes. It is <b>not</b> financial advice. You are solely responsible for your decisions.</p>
-              <p><b>No Warranties.</b> Data may be delayed, incomplete, or inaccurate. The service is provided “as is”.</p>
-              <p><b>Acceptable Use.</b> Don’t abuse, scrape, or attempt to reverse-engineer the service.</p>
-              <p><b>Subscriptions.</b> Managed by your payment provider. You can cancel anytime through that provider.</p>
-              <p><b>Liability.</b> To the fullest extent permitted by law, we are not liable for any losses or damages arising from your use of the product.</p>
-              <p><b>Contact.</b> {CONTACT_EMAIL}</p>
-            </div>
-          </div>
+      {/* Footer */}
+      <div style={{textAlign:"center", color:"#94a3b8", padding:"20px 0 40px"}}>
+        <div style={{display:"flex", gap:12, justifyContent:"center", flexWrap:"wrap", marginBottom:8}}>
+          <a href="#/terms" style={{color:"#D4AF37"}}>Terms</a>
+          <a href="#/privacy" style={{color:"#D4AF37"}}>Privacy</a>
+          <a href="#/" style={{color:"#2E86DE"}}>Home</a>
         </div>
-      )}
-
-      {/* Privacy Modal */}
-      {showPrivacy && (
-        <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,.7)", display:"grid", placeItems:"center", zIndex:50 }}>
-          <div style={{ width:"94%", maxWidth:720, maxHeight:"80vh", overflow:"auto", background:"#0A1A2F", border:"1px solid #2E86DE", borderRadius:16, padding:16 }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <div style={{ fontWeight:800, fontSize:18 }}>Privacy Policy</div>
-              <button onClick={()=>setShowPrivacy(false)} style={{ border:"1px solid #444", color:"#fff", background:"transparent", borderRadius:10, padding:"6px 10px" }}>Close</button>
-            </div>
-            <div style={{ marginTop:10, color:"#ddd", lineHeight:1.6, fontSize:14 }}>
-              <p><b>Data We Handle.</b> We process inputs you paste (e.g., links/addresses) to fetch public on-chain data. We don’t require an account for the MVP and store settings locally in your browser.</p>
-              <p><b>Analytics.</b> We may use privacy-friendly, cookie-light analytics to improve performance.</p>
-              <p><b>Emails.</b> If you subscribe to our newsletter, we will store your email with our email provider and use it only for updates and promotions. You can unsubscribe anytime.</p>
-              <p><b>Security.</b> We use modern hosting and HTTPS but no system is perfectly secure.</p>
-              <p><b>Contact.</b> {CONTACT_EMAIL}</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Footer with links */}
-      <footer style={{ textAlign:"center", padding:12, fontSize:12, color:"#D4AF37aa" }}>
-        <div style={{ display:"flex", gap:12, justifyContent:"center", flexWrap:"wrap", marginBottom:6 }}>
-          <a href="#" onClick={(e)=>{e.preventDefault(); setShowTerms(true);}} style={{ color:"#D4AF37" }}>Terms</a>
-          <a href="#" onClick={(e)=>{e.preventDefault(); setShowPrivacy(true);}} style={{ color:"#D4AF37" }}>Privacy</a>
-          <a href="#" onClick={(e)=>{e.preventDefault(); setShowNewsletter(true);}} style={{ color:"#2E86DE" }}>Newsletter</a>
-        </div>
-        © {new Date().getFullYear()} Fortunex AI
-      </footer>
+        © {new Date().getFullYear()} Fortunex AI • Educational insights only.
+      </div>
     </div>
   );
 }
 
-/* ---------- small UI helpers ---------- */
-function Stat({ label, value }) {
+/* ---------- Components ---------- */
+function MetricBar({title, value}) {
+  const v = clamp(value, 0, 10);
   return (
-    <div style={{ background:"#111", border:"1px solid #D4AF3722", borderRadius:12, padding:10 }}>
-      <div style={{ fontSize:12, color:"#D4AF37cc" }}>{label}</div>
-      <div style={{ fontWeight:600 }}>{value}</div>
+    <div style={{background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:12}}>
+      <div style={{fontSize:12, color:"#9ca3af", marginBottom:6}}>{title}</div>
+      <div style={{height:10, background:"#091425", borderRadius:8, overflow:"hidden"}}>
+        <div style={{height:"100%", width:`${(v/10)*100}%`, background:"linear-gradient(90deg,#60a5fa,#22c55e)"}}/>
+      </div>
+      <div style={{fontSize:12, color:"#94a3b8", marginTop:4}}>{v.toFixed(1)}/10</div>
     </div>
   );
 }
-function Bar({ label, value }) {
-  const p = Math.round((Number(value) / 10) * 100);
+function Stat({title, value}) {
+  return (
+    <div style={{background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:12}}>
+      <div style={{fontSize:12, color:"#9ca3af"}}>{title}</div>
+      <div style={{fontWeight:800, marginTop:4}}>{value}</div>
+    </div>
+  );
+}
+function PlanCard({name, price, cta, href, note}) {
+  return (
+    <a href={href} target="_blank" rel="noreferrer" style={{textDecoration:"none"}}>
+      <div style={{height:"100%", background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:14, color:"#e5e7eb"}}>
+        <div style={{fontWeight:800}}>{name}</div>
+        <div style={{fontSize:24, fontWeight:900, margin:"6px 0"}}>{price}</div>
+        {note && <div style={{fontSize:12, color:"#9ca3af"}}>{note}</div>}
+        <div style={{marginTop:10, background:"linear-gradient(135deg,#60a5fa,#22c55e)", color:"#0b1220", borderRadius:10, padding:"8px 10px", textAlign:"center", fontWeight:900}}>{cta}</div>
+      </div>
+    </a>
+  );
+}
+function ListCard({title, color, items, empty}) {
   return (
     <div>
-      <div style={{ display:"flex", justifyContent:"space-between", fontSize:12, marginBottom:4 }}>
-        <span style={{ color:"#D4AF37cc" }}>{label}</span>
-        <span>{Number(value).toFixed(1)}/10</span>
-      </div>
-      <div style={{ height:10, background:"#1b1b1b", borderRadius:8, overflow:"hidden", border:"1px solid #333" }}>
-        <div style={{ width:`${p}%`, height:"100%", background:"linear-gradient(90deg,#2E86DE,#D4AF37)" }} />
-      </div>
+      <div style={{fontWeight:700, color, marginBottom:6}}>{title}</div>
+      <ul style={{margin:"0 0 0 18px", padding:0}}>
+        {items.length ? items.map((p,i)=>(<li key={i} style={{marginBottom:4}}>{p}</li>)) : <li>{empty}</li>}
+      </ul>
     </div>
   );
 }
-function Sparkline({ points = [], height = 50 }) {
-  if (!points.length) return null;
-  const d = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(" ");
-  const up = points[points.length - 1].y < points[0].y;
-  const stroke = up ? "#2ECC71" : "#E74C3C";
+function LegalShell({title, children}) {
   return (
-    <svg viewBox="0 0 100 100" preserveAspectRatio="none" style={{ width:"100%", height }}>
-      <path d={d} fill="none" stroke={stroke} strokeWidth="2" />
-    </svg>
-  );
-}
-function QA({ q, a }) {
-  return (
-    <div style={{ border:"1px solid #2a3b5a", borderRadius:12, padding:12 }}>
-      <div style={{ fontWeight:700 }}>{q}</div>
-      <div style={{ marginTop:4, color:"#D4AF37aa", fontSize:14 }}>{a}</div>
-    </div>
-  );
-}
-
-/* ---------- Compare UI ---------- */
-function CompareCard({ title, data }) {
-  const p = data?.top;
-  const mood = data?.qual?.mood || "Neutral";
-  const moodCol = moodColor(mood);
-  const buys = p?.txns?.h24?.buys ?? 0;
-  const sells = p?.txns?.h24?.sells ?? 0;
-  return (
-    <div style={{ background:"#0A1A2F", border:"1px solid #2E86DE55", borderRadius:12, padding:12 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <div style={{ fontWeight:700 }}>{title}</div>
-        <span style={{ marginLeft:"auto", border:`1px solid ${moodCol}`, color:moodCol, borderRadius:8, padding:"2px 8px", fontSize:12 }}>{mood}</span>
-      </div>
-      <div style={{ fontWeight:700, marginTop:6 }}>{p?.baseToken?.symbol}/{p?.quoteToken?.symbol}</div>
-      <div style={{ fontSize:12, opacity:.8, marginBottom:6 }}>{p?.chainId}</div>
-
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(2,minmax(0,1fr))", gap:8 }}>
-        <Stat label="Price" value={`$${Number(p?.priceUsd ?? 0).toFixed(6)}`} />
-        <Stat label="Fortune" value={`${data?.qual?.fortune}/100`} />
-        <Stat label="Vol 24h" value={`$${k(p?.volume?.h24)}`} />
-        <Stat label="Liq" value={`$${k(p?.liquidity?.usd)}`} />
-        <Stat label="Buyer Share" value={`${data?.qual?.buyerShare}%`} />
-        <Stat label="Tx 24h" value={`${buys} / ${sells}`} />
-      </div>
-    </div>
-  );
-}
-function CompareTable({ a, b }) {
-  const rows = [
-    ["Fortune", a.qual.fortune, b.qual.fortune, v=>v],
-    ["Liquidity ($)", a.top?.liquidity?.usd ?? 0, b.top?.liquidity?.usd ?? 0, v=>"$"+k(v)],
-    ["Volume 24h ($)", a.top?.volume?.h24 ?? 0, b.top?.volume?.h24 ?? 0, v=>"$"+k(v)],
-    ["Buyer Share (%)", a.qual.buyerShare, b.qual.buyerShare, v=>v.toFixed(1)+"%"],
-    ["Price 24h (%)", a.top?.priceChange?.h24 ?? 0, b.top?.priceChange?.h24 ?? 0, v=>pct(v)],
-  ];
-  const winCol = (av,bv)=> (av>bv?"#2ECC7188":av<bv?"#E74C3C88":"transparent");
-  return (
-    <div style={{ marginTop:12, background:"#0A1A2F", border:"1px solid #2E86DE55", borderRadius:12, overflow:"hidden" }}>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", padding:"10px 12px", borderBottom:"1px solid #2a3b5a", fontWeight:700 }}>
-        <div>Metric</div><div style={{ textAlign:"center" }}>Token A</div><div style={{ textAlign:"center" }}>Token B</div>
-      </div>
-      {rows.map(([name,av,bv,fmt],i)=>(
-        <div key={i} style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", padding:"8px 12px", borderTop:"1px solid #1b2a44" }}>
-          <div style={{ opacity:.9 }}>{name}</div>
-          <div style={{ textAlign:"center", background:winCol(av,bv), borderRadius:6 }}>{fmt(Number(av)||0)}</div>
-          <div style={{ textAlign:"center", background:winCol(bv,av), borderRadius:6 }}>{fmt(Number(bv)||0)}</div>
+    <div style={{maxWidth:900, margin:"0 auto", padding:"0 16px 32px"}}>
+      <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
+        <div style={{fontWeight:900, fontSize:20, marginBottom:10}}>{title}</div>
+        <div style={{color:"#e5e7eb", lineHeight:1.7, fontSize:14}}>
+          {children}
         </div>
-      ))}
+        <div style={{marginTop:16}}>
+          <a href="#/" style={{color:"#2E86DE"}}>← Back to app</a>
+        </div>
+      </div>
     </div>
   );
 }
+
+/* ---------- Derived metrics for bars ---------- */
+function stabilityFrom(ds) {
+  const liq = Number(ds?.liquidity?.usd ?? 0);
+  const tx24 = Number(ds?.txns24h?.buys ?? 0) + Number(ds?.txns24h?.sells ?? 0);
+  let s = 0;
+  s += liq >= 150_000 ? 6 : liq >= 40_000 ? 4 : 2;
+  s += tx24 >= 2000 ? 4 : tx24 >= 300 ? 2 : 0;
+  return clamp(s, 0, 10);
+}
+function growthFrom(ds) {
+  const vol24 = Number(ds?.volume?.h24 ?? 0);
+  const mcap = Number(ds?.fdv ?? ds?.marketCap ?? 0);
+  let g = 0;
+  g += vol24 >= 1_000_000 ? 6 : vol24 >= 100_000 ? 4 : 2;
+  g += mcap > 0 && mcap < 10_000_000 ? 4 : 2;
+  return clamp(g, 0, 10);
+}
+function momentumFrom(ds) {
+  const h6 = Number(ds?.priceChange?.h6 ?? 0);
+  const h24 = Number(ds?.priceChange?.h24 ?? 0);
+  let m = 5 + (h6/20) + (h24/20);
+  return clamp(m, 0, 10);
+       }
