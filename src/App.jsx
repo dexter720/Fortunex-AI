@@ -1,396 +1,400 @@
 import React, { useEffect, useMemo, useState } from "react";
 
-/** =========================
- *  CONFIG — replace later with real checkout links
- *  ========================= */
-const STRIPE = {
-  MONTHLY: "https://buy.stripe.com/your-monthly-link",
-  ANNUAL:  "https://buy.stripe.com/your-annual-link",
-  LIFE:    "https://buy.stripe.com/your-lifetime-link",
-};
+// =========================
+// Stripe checkout (TEST)
+// Replace with LIVE later
+// =========================
+const STRIPE_MONTHLY = "https://buy.stripe.com/test_aFa3cx2oGfeS4Xp49hgjC02";
+const STRIPE_ANNUAL  = "https://buy.stripe.com/test_bJe14p7J0aYC89B49hgjC01";
+const STRIPE_LIFE    = "https://buy.stripe.com/test_14A5kF6EWd6K2PhcFNgjC00";
 
-const TRIAL_DAYS = 3;
-const FREE_USES_PER_DAY = 2;
+// Dexscreener API
+const DS_API = "https://api.dexscreener.com/latest/dex";
 
-/** =========================
- *  UTIL
- *  ========================= */
-const fmt = (n, d = 2) => {
-  const v = Number(n);
-  return Number.isFinite(v) ? v.toLocaleString(undefined, { maximumFractionDigits: d }) : "—";
-};
-const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
-const todayKey = () => new Date().toISOString().slice(0, 10);
-const getParam = (k) => new URLSearchParams(window.location.search).get(k) || "";
+// --- simple helpers ---
+function clamp(n, lo, hi) { return Math.max(lo, Math.min(hi, n)); }
+function pct(n) { return (n == null || isNaN(n)) ? "—" : `${Number(n).toFixed(2)}%`; }
+function money(n) {
+  if (n == null || isNaN(n)) return "—";
+  if (n >= 1_000_000) return "$" + (n/1_000_000).toFixed(2) + "M";
+  if (n >= 1_000)     return "$" + (n/1_000).toFixed(2) + "k";
+  return "$" + Number(n).toFixed(2);
+}
+function shortAddr(a="") { return a.length > 10 ? a.slice(0,4) + "…" + a.slice(-4) : a; }
 
-/** =========================
- *  ROBUST INPUT PARSER
- *  Accepts: Dexscreener (all variants), Birdeye links, plain address, or token/name
- *  ========================= */
-function parseInput(raw) {
-  if (!raw) return null;
-  const s = String(raw).trim();
-
-  // Bare address / pair / mint (very loose, covers Solana etc.)
-  if (/^[A-Za-z0-9]{20,100}$/.test(s)) {
-    return { src: "address", chain: null, pair: s, q: s };
-  }
-
+function parseDexInput(raw) {
+  const t = raw.trim();
   try {
-    const u = new URL(s);
-
-    // Dexscreener variants
-    if (u.hostname.includes("dexscreener.com")) {
-      const parts = u.pathname.split("/").filter(Boolean).map(x => x.toLowerCase());
-      // Examples:
-      // /solana/<pairAddress>
-      // /pairs/solana/<pairAddress>
-      // /solana?pairAddress=<pair>
-      // /<chain>/<anything-with-extra>
-      const qp = u.searchParams.get("pairAddress") || u.searchParams.get("pair") || "";
-
-      const known = ["solana","bsc","ethereum","base","arbitrum","avalanche","polygon","optimism",
-                     "fantom","tron","sui","aptos","ton","blast","linea","scroll","cronos","kava",
-                     "era","zksync","metis"];
-      let chain = null;
-      if (parts[0] && known.includes(parts[0])) chain = parts[0];
-      if (!chain && parts[1] && known.includes(parts[1])) chain = parts[1];
-
-      // last path segment can be the pair address in many cases
-      let lastSeg = parts.length ? parts[parts.length - 1] : "";
-      // If path starts with "pairs", next is chain, then pair
-      if (parts[0] === "pairs" && parts.length >= 3) lastSeg = parts[2];
-
-      // choose candidate
-      let candidate = qp || lastSeg;
-      if (!/^[A-Za-z0-9]{20,100}$/.test(candidate)) candidate = "";
-
-      return { src: "dexscreener", chain, pair: candidate || null, q: candidate || s };
-    }
-
-    // Birdeye: https://birdeye.so/token/<mint>?chain=solana
-    if (u.hostname.includes("birdeye.so")) {
+    // If full URL from Dexscreener, TradingView, etc.
+    const u = new URL(t);
+    // Dexscreener: /<chain>/<pairAddress>
+    if (u.hostname.includes("dexscreener")) {
       const parts = u.pathname.split("/").filter(Boolean);
-      const i = parts.indexOf("token");
-      const mint = i >= 0 ? parts[i + 1] : "";
-      const chain = (u.searchParams.get("chain") || "solana").toLowerCase();
-      if (mint && /^[A-Za-z0-9]{20,100}$/.test(mint)) {
-        return { src: "birdeye", chain, pair: mint, q: mint };
-      }
-      return { src: "birdeye", chain, pair: null, q: s };
+      const chain = parts[0];
+      const pair  = parts[1];
+      if (chain && pair) return { type: "pair", query: `${chain}/${pair}` };
     }
-
-    // Any other URL — pass to search
-    return { src: "url", chain: null, pair: null, q: s };
+    // If they paste a straight address, treat as search query
+    return { type: "search", query: t };
   } catch {
-    // Not a URL — treat as token/name query
-    return { src: "text", chain: null, pair: null, q: s };
+    // Not a URL – could be symbol or address
+    return { type: "search", query: t };
   }
 }
 
-/** =========================
- *  PAIR RESOLVER
- *  Tries direct pair endpoint first; falls back to search
- *  ========================= */
-async function resolvePair(info) {
-  // Try fast pair endpoint if we have a candidate
-  if (info?.pair) {
-    const chain = (info.chain || "solana").toLowerCase();
-    try {
-      const r = await fetch(
-        `https://api.dexscreener.com/latest/dex/pairs/${encodeURIComponent(chain)}/${encodeURIComponent(info.pair)}`
-      );
-      if (r.ok) {
-        const j = await r.json();
-        if (j?.pairs?.[0]) return j.pairs[0];
-      }
-    } catch { /* fallthrough */ }
-  }
+function scoreFromPair(p) {
+  // Dumb-but-useful composite score, 0..100
+  const priceChange24h = Number(p.priceChange?.h24 ?? 0);
+  const txBuys24 = Number(p.txns?.h24?.buys ?? 0);
+  const txSells24 = Number(p.txns?.h24?.sells ?? 0);
+  const buyersShare = txBuys24 + txSells24 > 0 ? (txBuys24 / (txBuys24 + txSells24)) : 0;
+  const liq = Number(p.liquidity?.usd ?? 0);
+  const vol = Number(p.volume?.h24 ?? 0);
 
-  // Fallback to search with whatever we have
-  const q = info?.pair || info?.q || "";
-  if (!q) return null;
-  const rs = await fetch(`https://api.dexscreener.com/latest/dex/search?q=${encodeURIComponent(q)}`);
-  if (!rs.ok) throw new Error("Dexscreener search unavailable.");
-  const js = await rs.json();
-  return (js.pairs && js.pairs[0]) || null;
-}
+  const growth = clamp((priceChange24h + 100) / 2, 0, 100); // (-100..+100) -> 0..100
+  const stability = clamp( (liq > 0 ? Math.log10(liq)/6*100 : 0), 0, 100); // ~0..100 as liq grows
+  const momentum = clamp( (vol > 0 ? Math.log10(vol)/6*100 : 0), 0, 100);
 
-/** =========================
- *  SCORING
- *  ========================= */
-function buildAnalysis(p) {
-  const liquidity = Number(p?.liquidity?.usd || 0);
-  const vol24    = Number(p?.volume?.h24 || 0);
-  const txBuys   = Number(p?.txns?.h24?.buys || 0);
-  const txSells  = Number(p?.txns?.h24?.sells || 0);
-  const buyers   = txBuys + txSells ? (txBuys / (txBuys + txSells)) * 100 : 0;
+  const buyerShare100 = Math.round(buyersShare * 100);
 
-  const pc1  = Number(p?.priceChange?.h1 || 0);
-  const pc6  = Number(p?.priceChange?.h6 || 0);
-  const pc24 = Number(p?.priceChange?.h24 || 0);
+  const fortune = clamp(
+    0.45*growth + 0.35*stability + 0.20*momentum,
+    0, 100
+  );
 
-  const stability = clamp(10 - Math.abs(pc24) / 10, 0, 10); // flatter 24h → higher stability
-  const growth    = clamp(vol24 / (liquidity ? liquidity / 5 : 1), 0, 10);
-  const momentum  = clamp((buyers - 50) / 5 + 5, 0, 10);
-
-  const fortune = clamp((stability + growth + momentum) / 3, 0, 10);
-  const bias = fortune >= 6.7 ? "Bullish" : fortune <= 3.3 ? "Bearish" : "Neutral";
-
-  const explain = [];
-  if (liquidity >= 100000) explain.push("Healthy liquidity supports price stability.");
-  else if (liquidity >= 20000) explain.push("Moderate liquidity; price can move quickly.");
-  if (vol24 > liquidity / 5) explain.push("Strong 24h volume relative to liquidity.");
-  if (buyers > 55) explain.push("Buyers dominate recent flow.");
-  if (Math.abs(pc24) < 5) explain.push("Controlled 24h volatility.");
-  if (explain.length === 0) explain.push("Mixed signals — consider waiting for confirmation.");
+  // Label from score
+  let label = "Neutral";
+  if (fortune >= 67) label = "Bullish";
+  else if (fortune <= 33) label = "Bearish";
 
   return {
-    name: p?.baseToken?.name || p?.baseToken?.symbol || "Token",
-    pairAddress: p?.pairAddress,
-    priceUsd: Number(p?.priceUsd || 0),
-    liquidity, vol24,
-    tx24: { buys: txBuys, sells: txSells },
-    buyersPct: buyers,
-    priceChange: p?.priceChange || {},
-    pooled: p?.liquidity || {},
-    createdAt: p?.pairCreatedAt || null,
-    fortune, stability, growth, momentum, bias, explain,
-    link: p?.url,
-    chain: p?.chainId || null
+    label,
+    fortune: Math.round(fortune),
+    subscores: {
+      growth: Number((growth/10).toFixed(1)),
+      stability: Number((stability/10).toFixed(1)),
+      momentum: Number((momentum/10).toFixed(1)),
+    },
+    buyerShare100
   };
 }
 
-/** =========================
- *  HOOKS — free quota & trial
- *  ========================= */
-function useFreeQuota(limitPerDay = FREE_USES_PER_DAY) {
-  const [left, setLeft] = useState(limitPerDay);
-  useEffect(() => {
-    const k = "fx_free_" + todayKey();
-    const used = Number(localStorage.getItem(k) || "0");
-    setLeft(Math.max(0, limitPerDay - used));
-  }, [limitPerDay]);
-  const consume = () => {
-    const k = "fx_free_" + todayKey();
-    const used = Number(localStorage.getItem(k) || "0") + 1;
-    localStorage.setItem(k, String(used));
-    setLeft(Math.max(0, limitPerDay - used));
-  };
-  return { left, consume };
+function buildAIInsight(p, scored) {
+  const lines = [];
+  const ch1 = p.priceChange?.h1, ch6 = p.priceChange?.h6, ch24 = p.priceChange?.h24;
+  const liq = Number(p.liquidity?.usd ?? 0);
+  const vol24 = Number(p.volume?.h24 ?? 0);
+  const buys = Number(p.txns?.h24?.buys ?? 0);
+  const sells = Number(p.txns?.h24?.sells ?? 0);
+  const buyerShare = scored.buyerShare100;
+
+  if (liq < 10_000) lines.push("Low liquidity — price can move fast and slippage is likely.");
+  if (vol24 > 50_000) lines.push("Healthy trading activity in the last 24h.");
+  if (buyerShare >= 55) lines.push("Buyers dominate recent flow (≥55%).");
+  if (ch24 && ch24 > 20) lines.push("Strong 24h growth — watch for continuation or pullback.");
+  if (ch1 && ch1 < -5 && ch24 && ch24 > 0) lines.push("Short-term dip within a larger uptrend — potential buy-the-dip zone.");
+  if (buys + sells < 50) lines.push("Very low transaction count — consider waiting for more market confirmation.");
+  if (lines.length === 0) lines.push("Mixed signals — consider waiting for clearer trend or confirmation levels.");
+
+  return lines;
 }
 
-function useTrial(days = TRIAL_DAYS) {
-  const [left, setLeft] = useState(days);
-  useEffect(() => {
-    let start = localStorage.getItem("fx_trial_start");
-    if (!start) { start = String(Date.now()); localStorage.setItem("fx_trial_start", start); }
-    const used = Math.floor((Date.now() - Number(start)) / 86400000);
-    setLeft(Math.max(0, days - used));
-  }, [days]);
-  return left;
-}
-
-/** =========================
- *  MAIN APP
- *  ========================= */
 export default function App() {
-  const [raw, setRaw] = useState("");
+  // ---- UI state
+  const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState("");
-  const [analysis, setAnalysis] = useState(null);
+  const [pair, setPair] = useState(null);
+  const [error, setError] = useState("");
+  const [freeLeft, setFreeLeft] = useState(2);
+  const [watch, setWatch] = useState([]);
 
-  // quota + trial
-  const trialLeft = useTrial(TRIAL_DAYS);
-  const quota = useFreeQuota(FREE_USES_PER_DAY);
-
-  // referral code (owner)
-  const myRef = useMemo(() => {
-    let code = localStorage.getItem("fx_ref");
-    if (!code) { code = Math.random().toString(36).slice(2,7).toUpperCase(); localStorage.setItem("fx_ref", code); }
-    return code;
-  }, []);
-
-  // capture ?ref= on app page as well
+  // restore watchlist & freeLeft from localStorage
   useEffect(() => {
-    const ref = getParam("ref");
-    if (ref) { try { localStorage.setItem("fx_referredBy", ref); } catch(e){} }
+    try {
+      const w = JSON.parse(localStorage.getItem("fx_watch") || "[]");
+      setWatch(Array.isArray(w) ? w : []);
+      const d = new Date().toDateString();
+      const rec = JSON.parse(localStorage.getItem("fx_quota") || "{}");
+      if (rec.date !== d) {
+        localStorage.setItem("fx_quota", JSON.stringify({ date: d, left: 2 }));
+        setFreeLeft(2);
+      } else {
+        setFreeLeft(Number(rec.left ?? 2));
+      }
+    } catch (e) {}
   }, []);
 
-  const inviteLink = useMemo(() => {
-    const u = new URL(window.location.href);
-    u.searchParams.set("ref", myRef);
-    return u.toString();
-  }, [myRef]);
-
-  // build Stripe links with metadata
-  const refSuffix = `?client_reference_id=${myRef}${getParam("ref") ? `&referred_by=${getParam("ref")}` : ""}`;
-  const PAY = {
-    MONTHLY: STRIPE.MONTHLY + refSuffix,
-    ANNUAL:  STRIPE.ANNUAL  + refSuffix,
-    LIFE:    STRIPE.LIFE    + refSuffix
+  const saveQuota = (n) => {
+    setFreeLeft(n);
+    localStorage.setItem("fx_quota", JSON.stringify({ date: new Date().toDateString(), left: n }));
   };
 
-  async function onAnalyze() {
-    setErr("");
-    setAnalysis(null);
+  const analyze = async () => {
+    setError("");
+    setPair(null);
 
-    if (quota.left <= 0) { setErr("Free limit reached for today. Upgrade for unlimited access."); return; }
+    // simple free gate
+    if (freeLeft <= 0) {
+      setError("Free limit reached. Upgrade to unlock unlimited daily analyses.");
+      return;
+    }
 
-    const info = parseInput(raw);
-    if (!info) { setErr("Paste a Dexscreener/Birdeye link, contract address, or token name."); return; }
+    const parsed = parseDexInput(input);
+    if (!parsed.query) {
+      setError("Paste a DEX link, address or token name.");
+      return;
+    }
 
     setLoading(true);
     try {
-      const pair = await resolvePair(info);
-      if (!pair) throw new Error("Couldn’t find that pair. Try another link or paste the address.");
+      let url;
+      if (parsed.type === "pair" || parsed.query.includes("/")) {
+        // Direct pair
+        url = `${DS_API}/pairs/${parsed.query}`;
+      } else {
+        // Search
+        url = `${DS_API}/search?q=${encodeURIComponent(parsed.query)}`;
+      }
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("API error");
+      const data = await res.json();
 
-      setAnalysis(buildAnalysis(pair));
-      quota.consume();
+      let found = null;
+      if (data.pairs && data.pairs.length) found = data.pairs[0];
+      if (data.pair) found = data.pair;
+
+      if (!found) throw new Error("No data found. Try a specific pair URL from Dexscreener.");
+
+      setPair(found);
+      saveQuota(freeLeft - 1);
     } catch (e) {
-      setErr(e.message || "Analysis failed.");
+      setError(e.message || "Could not fetch pair.");
     } finally {
       setLoading(false);
     }
-  }
+  };
+
+  const scored = useMemo(() => pair ? scoreFromPair(pair) : null, [pair]);
+  const insights = useMemo(() => pair && scored ? buildAIInsight(pair, scored) : [], [pair, scored]);
+
+  // referral snippet (Invite & Earn)
+  const refCode = useMemo(() => {
+    // quick 5-char code
+    return (Math.random().toString(36).slice(2,7)).toUpperCase();
+  }, []);
+  const referLink = useMemo(() => {
+    const u = new URL(window.location.href);
+    u.searchParams.set("ref", refCode);
+    return u.toString();
+  }, [refCode]);
+
+  const addWatch = () => {
+    if (!pair) return;
+    const item = {
+      addr: pair.pairAddress || pair.baseToken?.address || "",
+      name: pair.baseToken?.name || pair.baseToken?.symbol || "Token",
+      chain: pair.chainId || pair.chain || "",
+    };
+    const next = [item, ...watch.filter(x => x.addr !== item.addr)].slice(0, 20);
+    setWatch(next);
+    localStorage.setItem("fx_watch", JSON.stringify(next));
+  };
 
   return (
     <div className="container">
-      {/* Top nav */}
-      <div className="header-bar card" style={{padding:"10px 14px", marginBottom:12}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:12}}>
-          <div className="brand" style={{display:"flex",alignItems:"center",gap:12,fontWeight:800}}>
-            <div className="brand-badge" style={{
-              width:36,height:36,borderRadius:11,display:"grid",placeItems:"center",
-              background:"linear-gradient(135deg,#69d1ff,#38ef7d)",color:"#0b1728"
-            }}>F</div>
-            <div>FORTUNEX&nbsp;AI</div>
-          </div>
-          <div className="gap-8" style={{display:"flex",gap:10,flexWrap:"wrap"}}>
-            <a className="badge" href="/landing.html">Landing</a>
-            <a className="badge" href="/terms.html">Terms</a>
-            <a className="badge" href="/privacy.html">Privacy</a>
-            <a className="badge" href="#pricing">Pricing</a>
+      {/* Header */}
+      <header className="topbar">
+        <div className="logo">
+          <div className="badge">F</div>
+          <div>
+            <div className="title">FORTUNEX AI</div>
+            <div className="subtitle">Token Intelligence Dashboard</div>
           </div>
         </div>
-      </div>
+        <nav className="nav">
+          <a href="#" onClick={(e)=>{e.preventDefault(); window.location.href="/";}}>Home</a>
+          <a href="/terms" onClick={(e)=>{e.preventDefault(); window.location.href="/terms";}}>Terms</a>
+          <a href="/privacy" onClick={(e)=>{e.preventDefault(); window.location.href="/privacy";}}>Privacy</a>
+          <a href="#pricing" className="highlight">Pricing</a>
+        </nav>
+      </header>
 
-      {/* Trial banner */}
-      {trialLeft > 0 && (
-        <div className="banner card" style={{marginBottom:14}}>
-          <strong className="badge warn" style={{marginRight:8}}>Trial</strong>
-          You have <strong>{trialLeft} {trialLeft === 1 ? "day" : "days"}</strong> left. Full features — no card required.
-        </div>
-      )}
+      {/* NO trial banner — we rely on free 2/day gate */}
 
       {/* Main grid */}
       <div className="grid-2">
-        {/* LEFT — Input & Result */}
+        {/* Left: Input & Result */}
         <div className="card">
-          <div className="h1">Paste DEX link / address / name</div>
-          <div className="gap-8" style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <div className="card-title">Paste DEX link / address / name</div>
+          <div className="inputRow">
             <input
-              placeholder="e.g. https://dexscreener.com/solana/<pair> or birdeye.so/token/<mint>?chain=solana"
-              value={raw}
-              onChange={(e) => setRaw(e.target.value)}
+              value={input}
+              onChange={(e)=>setInput(e.target.value)}
+              placeholder="https://dexscreener.com/solana/<pair>  or  0x...  or  TOKEN"
             />
-            <button className="btn" onClick={onAnalyze} disabled={loading}>
-              {loading ? "Analyzing…" : "Analyze"}
-            </button>
-            <div className="pill">Free uses today: {quota.left} / {FREE_USES_PER_DAY}</div>
+            <button onClick={analyze} disabled={loading}>{loading ? "Analyzing…" : "Analyze"}</button>
+            <span className="pill">Free uses today: {freeLeft} / 2</span>
           </div>
 
-          {err && <div className="badge warn" style={{marginTop:12}}>{err}</div>}
+          {error && <div className="error">{error}</div>}
 
-          {analysis && (
-            <div style={{marginTop:16}}>
-              <div className="h2">
-                {analysis.name}{" "}
-                <span className={`badge ${analysis.bias === "Bullish" ? "ok" : analysis.bias === "Bearish" ? "warn" : ""}`}>
-                  {analysis.bias}
-                </span>
+          {pair && scored && (
+            <div className="result">
+              <div className="row">
+                <span className={`badge-${scored.label.toLowerCase()}`}>{scored.label}</span>
+                <span className="muted">Fortune Score:</span>
+                <b>{scored.fortune}/100</b>
+                <a
+                  href={`https://dexscreener.com/${pair.chainId || "solana"}/${pair.pairAddress || ""}`}
+                  target="_blank" rel="noreferrer"
+                  className="ext"
+                >
+                  View on Dexscreener
+                </a>
               </div>
 
-              {/* Score summary */}
-              <div className="small" style={{marginTop:6}}>
-                Fortune Score: {fmt(analysis.fortune,1)}/10 • Stability {fmt(analysis.stability,1)}/10 • Growth {fmt(analysis.growth,1)}/10 • Momentum {fmt(analysis.momentum,1)}/10
+              <div className="bars">
+                <Bar label="Stability" value={scored.subscores.stability}/>
+                <Bar label="Growth" value={scored.subscores.growth}/>
+                <Bar label="Momentum" value={scored.subscores.momentum}/>
               </div>
 
-              {/* Key stats */}
-              <div className="grid-2" style={{gap:12, marginTop:12}}>
-                <div className="card">
-                  <div className="small">Price</div>
-                  <div className="price">${fmt(analysis.priceUsd,6)}</div>
-                </div>
-                <div className="card">
-                  <div className="small">Liquidity</div>
-                  <div className="price">${fmt(analysis.liquidity,0)}</div>
-                </div>
-                <div className="card">
-                  <div className="small">Vol 24h</div>
-                  <div className="price">${fmt(analysis.vol24,0)}</div>
-                </div>
-                <div className="card">
-                  <div className="small">Tx 24h</div>
-                  <div className="price">{fmt(analysis.tx24.buys,0)} buys / {fmt(analysis.tx24.sells,0)} sells</div>
-                </div>
+              <div className="stats">
+                <Stat label="1h / 6h / 24h">
+                  {pct(pair.priceChange?.h1)} • {pct(pair.priceChange?.h6)} • {pct(pair.priceChange?.h24)}
+                </Stat>
+                <Stat label="Price">{pair.priceUsd ? "$"+Number(pair.priceUsd).toFixed(6) : "—"}</Stat>
+                <Stat label="Liquidity">{money(pair.liquidity?.usd)}</Stat>
+                <Stat label="Vol 24h">{money(pair.volume?.h24)}</Stat>
+                <Stat label="Tx 24h">
+                  {Number(pair.txns?.h24?.buys ?? 0)} buys / {Number(pair.txns?.h24?.sells ?? 0)} sells
+                </Stat>
+                <Stat label="Buyer Share">{scored.buyerShare100}%</Stat>
+                <Stat label="Pair Age">
+                  {pair.info?.createdAt ? new Date(pair.info.createdAt).toLocaleDateString() : "—"}
+                </Stat>
               </div>
 
-              {/* Explanations */}
-              <div className="card" style={{marginTop:12}}>
-                <div className="h2">AI Insight</div>
-                <ul style={{margin:"8px 0 0 18px"}}>
-                  {analysis.explain.map((x,i)=><li key={i}>{x}</li>)}
+              <div className="ai">
+                <div className="aiTitle">AI Insight</div>
+                <ul className="aiList">
+                  {insights.map((t,i)=><li key={i}>{t}</li>)}
                 </ul>
-                <div className="mt-12">
-                  <a className="btn secondary" href={analysis.link} target="_blank" rel="noreferrer">View on Dexscreener</a>
-                </div>
-                <div className="note mt-12">Educational insights only — not financial advice.</div>
+                <div className="disclaimer">Educational insights only — Not financial advice.</div>
+              </div>
+
+              <div className="actionsRow">
+                <button onClick={addWatch}>Save to Watchlist</button>
               </div>
             </div>
           )}
         </div>
 
-        {/* RIGHT — Watchlist (placeholder) + Invite + Pricing */}
-        <div className="card">
-          <div className="h1">Watchlist</div>
-          <div className="note">No saved pairs yet.</div>
-
-          <div className="h1" style={{marginTop:16}}>Invite & Earn</div>
-          <div className="note">Share your link — we append your code to Stripe as <code>client_reference_id</code>.</div>
-          <input className="mt-8" readOnly value={inviteLink} onFocus={(e)=>e.target.select()} />
-          <div className="small mt-8">
-            Your code: <strong>{myRef}</strong> • Referred by: {localStorage.getItem("fx_referredBy") || "—"}
+        {/* Right: Watchlist + Invite + Pricing */}
+        <div className="stack">
+          <div className="card">
+            <div className="card-title">Watchlist</div>
+            {watch.length === 0 ? (
+              <div className="muted">No saved pairs yet.</div>
+            ) : (
+              <ul className="watch">
+                {watch.map((w)=>(
+                  <li key={w.addr}>
+                    <span className="mono">{shortAddr(w.addr)}</span>
+                    <span className="muted">{w.name}</span>
+                    <span className="chip">{w.chain}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
 
-          <div id="pricing" className="h1" style={{marginTop:16}}>Upgrade • Unlock unlimited analyses</div>
-
-          <div className="pricing-block">
-            <div className="h2">Pro Monthly</div>
-            <div className="price">€7.10</div>
-            <a className="btn mt-8" href={STRIPE.MONTHLY ? STRIPE.MONTHLY + `?client_reference_id=${myRef}` : "#"}>Start Monthly</a>
+          <div className="card">
+            <div className="card-title">Invite & Earn</div>
+            <div className="muted">Share your link — we append your code to Stripe as <code>client_reference_id</code>.</div>
+            <div className="copyRow">
+              <input value={referLink} readOnly onFocus={(e)=>e.target.select()} />
+              <button onClick={()=>{navigator.clipboard.writeText(referLink)}}>Copy</button>
+            </div>
+            <div className="muted small">Your code: <b>{refCode}</b> • Referred by: —</div>
           </div>
 
-          <div className="pricing-block">
-            <div className="h2">Pro Annual</div>
-            <div className="price">€71.00</div>
-            <a className="btn mt-8" href={STRIPE.ANNUAL ? STRIPE.ANNUAL + `?client_reference_id=${myRef}` : "#"}>Start Annual</a>
-          </div>
+          <div id="pricing" className="card">
+            <div className="card-title">Upgrade • Unlock unlimited analyses</div>
 
-          <div className="pricing-block">
-            <div className="h2">Lifetime</div>
-            <div className="price">€107.00</div>
-            <a className="btn mt-8" href={STRIPE.LIFE ? STRIPE.LIFE + `?client_reference_id=${myRef}` : "#"}>Buy Lifetime</a>
-          </div>
+            <div className="priceBlock">
+              <div className="planTitle">Pro Monthly</div>
+              <div className="price">€7.10</div>
+              <ul className="feat">
+                <li>Unlimited daily analyses</li>
+                <li>Full AI explanations</li>
+                <li>Save watchlist & notes</li>
+              </ul>
+              <a className="cta" href={`${STRIPE_MONTHLY}?client_reference_id=${refCode}`} target="_blank" rel="noreferrer">
+                Start Monthly
+              </a>
+            </div>
 
-          <div className="note mt-12">Educational tool — not financial advice.</div>
+            <div className="priceBlock">
+              <div className="planTitle">Pro Annual</div>
+              <div className="price">€71.00</div>
+              <ul className="feat">
+                <li>All Pro Monthly features</li>
+                <li>2 months free vs monthly</li>
+                <li>Priority email support</li>
+              </ul>
+              <a className="cta" href={`${STRIPE_ANNUAL}?client_reference_id=${refCode}`} target="_blank" rel="noreferrer">
+                Start Annual
+              </a>
+            </div>
+
+            <div className="priceBlock">
+              <div className="planTitle">Lifetime</div>
+              <div className="price">€107.00</div>
+              <ul className="feat">
+                <li>One-time payment</li>
+                <li>All future features</li>
+                <li>VIP badge</li>
+              </ul>
+              <a className="cta" href={`${STRIPE_LIFE}?client_reference_id=${refCode}`} target="_blank" rel="noreferrer">
+                Buy Lifetime
+              </a>
+            </div>
+
+            <div className="muted small">Educational tool — not financial advice.</div>
+          </div>
         </div>
       </div>
 
       {/* Footer */}
-      <div className="footer center mt-20">
-        © {new Date().getFullYear()} Fortunex AI • Educational insights only.
-      </div>
+      <footer className="footer">
+        <a href="/terms">Terms</a>
+        <a href="/privacy">Privacy</a>
+        <a href="/">Home</a>
+        <span className="muted">© 2025 Fortunex AI</span>
+      </footer>
     </div>
   );
-                                                                                      }
+}
+
+// ====== small presentational bits ======
+function Bar({label, value}) {
+  const pct = clamp(value*10, 0, 100);
+  return (
+    <div className="bar">
+      <div className="barTop">
+        <span>{label}</span>
+        <b>{value}/10</b>
+      </div>
+      <div className="track"><div className="fill" style={{width: pct + "%"}}/></div>
+    </div>
+  );
+}
+function Stat({label, children}) {
+  return (
+    <div className="stat">
+      <div className="muted">{label}</div>
+      <div>{children}</div>
+    </div>
+  );
+    }
