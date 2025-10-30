@@ -53,3 +53,4 @@ a{color:#cfe0ff} a:hover{color:#fff}
 
 /* Prevent side-scroll everywhere */
 .container, .grid-2, .card{overflow:hidden}
+html, body { overflow-x: hidden; }
