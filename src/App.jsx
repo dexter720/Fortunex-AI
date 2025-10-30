@@ -1,23 +1,22 @@
-// src/App.jsx — Fortunex AI v6.5 (Pro + Growth + Legal + Referrals)
-// Single-file app. Paste over your current App.jsx, save, deploy.
-// Replace STRIPE_* with real links later. Optional: set FORM_ENDPOINT.
+// src/App.jsx — Fortunex AI v6.6 (UI polish: pricing note removed + responsive cards)
+// Drop-in replacement. Paste, save, deploy.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-/* ---------- PRICING (8-sum alignment) ---------- */
+/* ---------- PRICING ---------- */
 const PRICING = {
-  monthly: { label: "Pro Monthly", price: "€7.10" , cents: 710  },
-  annual:  { label: "Pro Annual" , price: "€71.00", cents: 7100 },
-  lifetime:{ label: "Lifetime"   , price: "€107.00", cents: 10700 },
+  monthly: { label: "Pro Monthly", price: "€7.10", cents: 710 },
+  annual:  { label: "Pro Annual",  price: "€71.00", cents: 7100 },
+  lifetime:{ label: "Lifetime",    price: "€107.00", cents: 10700 },
 };
 
-/* ---------- STRIPE (placeholders; swap to real Payment Links) ---------- */
+/* ---------- STRIPE (replace with your real Payment Links) ---------- */
 export const STRIPE_MONTHLY = "https://buy.stripe.com/test-monthly_710";
 export const STRIPE_ANNUAL  = "https://buy.stripe.com/test-annual_7100";
 export const STRIPE_LIFE    = "https://buy.stripe.com/test-lifetime_10700";
 
-/* ---------- NEWSLETTER (Formspree endpoint; leave "" to auto mailto) ---------- */
-const FORM_ENDPOINT = ""; // e.g. "https://formspree.io/f/abcdqwer"
+/* ---------- NEWSLETTER (Formspree endpoint; empty => mailto fallback) ---------- */
+const FORM_ENDPOINT = ""; // e.g. "https://formspree.io/f/xxxxxxx"
 
 /* ---------- CONFIG ---------- */
 const FREE_DAILY_CAP = 2;
@@ -26,7 +25,7 @@ const LS_KEY   = "fortunex-usage";
 const LS_TRIAL = "fortunex-trial-since";
 const LS_WATCH = "fortunex-watchlist";
 const LS_REF   = "fortunex-ref-code";
-const LS_REFSRC= "fortunex-ref-source"; // who referred this device
+const LS_REFSRC= "fortunex-ref-source";
 
 /* ---------- Dexscreener REST ---------- */
 const DS_API = "https://api.dexscreener.com/latest/dex/search?q=";
@@ -70,16 +69,13 @@ function captureRefSource() {
   }
 }
 function buildCheckoutURL(base, planName) {
-  // Attach client_reference_id for Stripe analytics; pass promo code if desired
   const url = new URL(base);
   const refSrc  = localStorage.getItem(LS_REFSRC) || "";
   const myRef   = localStorage.getItem(LS_REF) || "";
   const cid = `plan=${encodeURIComponent(planName)}|ref=${refSrc || "none"}|my=${myRef}`;
   url.searchParams.set("client_reference_id", cid);
-
-  // OPTIONAL: if you enable promotion code "REF8" in Stripe, this will prefill it
+  // Optional Stripe promotion code:
   // url.searchParams.set("prefilled_promo_code", "REF8");
-
   return url.toString();
 }
 
@@ -159,23 +155,20 @@ function buildAnalysis(ds) {
   return { pros, cons, flags, bias, raw, confidence, rationale, action, url };
 }
 
-/* ---------- Minimal Hash Router ---------- */
-function getRoute() { return (window.location.hash || "#/").replace(/^#/, ""); }
-
 /* ---------- UI ---------- */
 export default function App() {
-  const [route,setRoute]=useState(getRoute());     // "#/", "#/terms", "#/privacy", "#/referrals"
   const [q,setQ]=useState("");
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState("");
-  const [pair,setPair]=useState(null); // { ds, an }
+  const [pair,setPair]=useState(null);
   const [used,setUsed]=useState(0);
   const [showUpgrade,setShowUpgrade]=useState(false);
   const [watch,setWatch]=useState(readWatch());
   const [showNL,setShowNL]=useState(false);
   const [email,setEmail]=useState("");
   const [nlMsg,setNlMsg]=useState("");
-  const [installEvt,setInstallEvt]=useState(null);   // PWA install event
+  const [installEvt,setInstallEvt]=useState(null);
+  const [route,setRoute]=useState((window.location.hash||"#/").replace(/^#/, ""));
 
   const [myRef, setMyRef] = useState(ensureRefCode());
   const refLink = useMemo(()=>{
@@ -184,27 +177,22 @@ export default function App() {
     return u.toString();
   }, [myRef]);
 
-  // print/PDF ref
   const printRef = useRef(null);
 
   useEffect(()=>{ ensureTrialStart(); setUsed(getUsage()); captureRefSource(); },[]);
   const trialLeft = trialRemainingDays();
 
-  // PWA install handler
   useEffect(()=>{
     const onPrompt=(e)=>{ e.preventDefault(); setInstallEvt(e); };
     window.addEventListener("beforeinstallprompt", onPrompt);
     return ()=>window.removeEventListener("beforeinstallprompt", onPrompt);
   },[]);
-
-  // Hash route
   useEffect(()=>{
-    const onHash=()=>setRoute(getRoute());
+    const onHash=()=>setRoute((window.location.hash||"#/").replace(/^#/, ""));
     window.addEventListener("hashchange", onHash);
     return ()=>window.removeEventListener("hashchange", onHash);
   },[]);
 
-  // parse input
   function parseQuery(raw){
     try{ const t=raw.trim(); if(!t) return ""; if(/^https?:\/\//i.test(t)) return t; return encodeURIComponent(t); }
     catch{ return ""; }
@@ -214,9 +202,7 @@ export default function App() {
     setErr("");
     const key=parseQuery(q);
     if(!key){ setErr("Paste a valid DEX link, token address or name."); return; }
-
     if (trialLeft===0 && getUsage()>=FREE_DAILY_CAP) { setShowUpgrade(true); return; }
-
     setBusy(true);
     try{
       const res = await fetch(DS_API + key);
@@ -254,7 +240,6 @@ Action: ${an.action.title} — ${an.action.detail}
     navigator.clipboard?.writeText(text);
   }
 
-  // PRINT / PDF
   function exportPDF(){
     if(!pair) return;
     const win = window.open("", "_blank");
@@ -267,9 +252,7 @@ Action: ${an.action.title} — ${an.action.detail}
         .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
         .pill{display:inline-block;padding:3px 8px;border-radius:999px;border:1px solid #334155}
       </style></head><body>${html}</body></html>`);
-    win.document.close();
-    win.focus();
-    win.print();
+    win.document.close(); win.focus(); win.print();
   }
 
   async function submitNewsletter(e){
@@ -289,13 +272,11 @@ Action: ${an.action.title} — ${an.action.detail}
     }catch{ setNlMsg("Could not submit right now."); }
   }
 
-  function triggerInstall(){
-    if(installEvt){ installEvt.prompt(); installEvt.userChoice?.then(()=>setInstallEvt(null)); }
-  }
+  function triggerInstall(){ if(installEvt){ installEvt.prompt(); installEvt.userChoice?.then(()=>setInstallEvt(null)); } }
 
   const badge = useMemo(()=> pair ? classifyBias(pair.an.raw) : null, [pair]);
 
-  /* ---------- UI Pieces ---------- */
+  /* ---------- Shared UI bits ---------- */
   const Label = ({children}) => (
     <span style={{background:"#0c111b",border:"1px solid #1f2937",color:"#cbd5e1",fontSize:12,padding:"3px 8px",borderRadius:999}}>{children}</span>
   );
@@ -304,204 +285,9 @@ Action: ${an.action.title} — ${an.action.detail}
   const btnGhost = { background:"transparent", color:"#e5e7eb", border:"1px solid #334155", borderRadius:10, padding:"6px 10px", cursor:"pointer" };
   const btnGrad  = { background:"linear-gradient(135deg,#60a5fa,#22c55e)", color:"#0b1220", border:"none", borderRadius:12, padding:"10px 16px", fontWeight:800, cursor:"pointer" };
 
-  /* ---------- Route Screens ---------- */
-  function ScreenHome() {
-    return (
-      <>
-        {/* Trial Banner */}
-        {trialLeft>0 && (
-          <div style={{maxWidth:1100, margin:"0 auto 10px", padding:"10px 12px", border:"1px solid #f59e0b55", borderRadius:10, background:"#0a1a2f"}}>
-            <strong style={{color:"#fbbf24"}}>Trial:</strong> You have <strong>{trialLeft} day{trialLeft>1?"s":""}</strong> left. Full features—no card required.
-          </div>
-        )}
+  /* ---------- Screens ---------- */
+  const routeHome = route === "/" || route === "";
 
-        {/* Input + Watchlist */}
-        <div style={{maxWidth:1100, margin:"0 auto", padding:"0 16px 16px"}}>
-          <div style={{display:"grid", gridTemplateColumns:"2fr 1fr", gap:16}}>
-            {/* Input */}
-            <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
-              <div style={{fontWeight:700, marginBottom:8}}>Paste DEX link / address / name</div>
-              <input
-                placeholder="https://dexscreener.com/solana/xxxx or CA/name"
-                value={q} onChange={(e)=>setQ(e.target.value)}
-                style={{width:"100%", background:"#0a1220", color:"#e5e7eb", border:"1px solid #1f2a44", borderRadius:12, padding:"12px 14px", outline:"none"}}
-              />
-              <div style={{display:"flex", alignItems:"center", gap:12, marginTop:12}}>
-                <button onClick={analyze} disabled={busy} style={btnGrad}>{busy?"Analyzing…":"Analyze"}</button>
-                <Label>Free uses today: {Math.max(0, FREE_DAILY_CAP - used)} / {FREE_DAILY_CAP}</Label>
-              </div>
-              {err && <div style={{marginTop:10, color:"#f87171"}}>{err}</div>}
-            </div>
-
-            {/* Watchlist */}
-            <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
-              <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
-                <div style={{fontWeight:800}}>Watchlist</div>
-                {pair && <button onClick={addToWatch} style={btnSm}>+ Add current</button>}
-              </div>
-              <div style={{marginTop:10, display:"grid", gap:8}}>
-                {watch.length===0 && <div style={{color:"#94a3b8"}}>No saved pairs yet.</div>}
-                {watch.map((w,i)=>(
-                  <div key={w.url+i} style={{display:"flex", justifyContent:"space-between", alignItems:"center", background:"#0a1220", border:"1px solid #1f2a44", borderRadius:10, padding:"8px 10px"}}>
-                    <a href={w.url} target="_blank" rel="noreferrer" style={{textDecoration:"none", color:"#e5e7eb"}}>{w.symbol}</a>
-                    <button onClick={()=>removeFromWatch(w.url)} style={btnGhost}>Remove</button>
-                  </div>
-                ))}
-              </div>
-              <div style={{marginTop:14, borderTop:"1px solid #1f2a44", paddingTop:12}}>
-                <div style={{fontWeight:800, marginBottom:6}}>Invite & Earn</div>
-                <div style={{fontSize:12, color:"#94a3b8"}}>Share your link — we append your code to Stripe as <code>client_reference_id</code>. Enable promo <b>REF8</b> in Stripe to auto-discount.</div>
-                <div style={{display:"grid", gridTemplateColumns:"1fr auto", gap:8, marginTop:8}}>
-                  <input value={refLink} readOnly style={{background:"#0a1220", color:"#e5e7eb", border:"1px solid #1f2a44", borderRadius:10, padding:"8px 10px"}}/>
-                  <button onClick={()=>navigator.clipboard?.writeText(refLink)} style={btnSm}>Copy</button>
-                </div>
-                <div style={{fontSize:12, color:"#94a3b8", marginTop:6}}>
-                  Your code: <b>{myRef}</b> • Referred by: <b>{localStorage.getItem(LS_REFSRC) || "—"}</b>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* RESULT + PRINT CONTENT WRAPPER */}
-        <div ref={printRef}>
-        {pair && (
-          <div style={{maxWidth:1100, margin:"0 auto", padding:"0 16px 24px"}}>
-            <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
-              {/* Header */}
-              <div style={{display:"flex", alignItems:"center", gap:12, marginBottom:10, flexWrap:"wrap"}}>
-                <div style={{width:28,height:28,borderRadius:999,background:"#1d4ed833",display:"grid",placeItems:"center"}}>👀</div>
-                <div style={{fontWeight:800}}>{pair.ds?.baseToken?.symbol}/{pair.ds?.quoteToken?.symbol}</div>
-                {badge && (
-                  <span style={{marginLeft:"auto",background:badge.color+"22",color:badge.color,border:`1px solid ${badge.color}66`,padding:"3px 10px",borderRadius:999,fontWeight:700}}>
-                    {badge.t} • Score: {Math.round(pair.an.raw)}/100
-                  </span>
-                )}
-                <span style={{background:"#0b1220",border:"1px solid #1f2937",borderRadius:999,padding:"3px 10px",fontWeight:700}}>
-                  Confidence: {Math.round(pair.an.confidence)}%
-                </span>
-              </div>
-
-              {/* Bars */}
-              <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12}}>
-                <MetricBar title="Stability" value={stabilityFrom(pair.ds)} />
-                <MetricBar title="Growth" value={growthFrom(pair.ds)} />
-                <MetricBar title="Momentum" value={momentumFrom(pair.ds)} />
-              </div>
-
-              {/* Why + Action + Flags */}
-              <div style={{display:"grid", gridTemplateColumns:"2fr 1fr", gap:14, marginTop:16}}>
-                <div style={{background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:14}}>
-                  <div style={{fontWeight:800, marginBottom:6}}>Why this verdict?</div>
-                  <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
-                    <ListCard title="Pros" color="#86efac" items={pair.an.pros} empty="No strong positives detected." />
-                    <ListCard title="Cons" color="#fca5a5" items={pair.an.cons} empty="No major red flags detected." />
-                  </div>
-                  <div style={{marginTop:10, padding:10, borderRadius:10, background:"#0b1220", border:"1px solid #1f2937", color:"#cbd5e1"}}>
-                    <strong>AI Insight:</strong> {pair.an.rationale}
-                    <div style={{fontSize:12, color:"#94a3b8", marginTop:6}}>Educational insights only — Not financial advice.</div>
-                  </div>
-                </div>
-
-                <div style={{display:"grid", gap:12}}>
-                  <div style={{background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:14}}>
-                    <div style={{fontWeight:800, marginBottom:6}}>Next Action</div>
-                    <div style={{fontWeight:900}}>{pair.an.action.title}</div>
-                    <div style={{color:"#cbd5e1", marginTop:4}}>{pair.an.action.detail}</div>
-                    <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}>
-                      <button onClick={copySummary} style={btnSm}>Copy summary</button>
-                      <a className="clean" href={pair.an.url} target="_blank" rel="noreferrer" style={{...btnSm, textDecoration:"none"}}>Open on DEX</a>
-                      <button onClick={exportPDF} style={btnSm}>Export PDF</button>
-                    </div>
-                  </div>
-                  <div style={{background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:14}}>
-                    <div style={{fontWeight:800, marginBottom:6}}>Risk Flags</div>
-                    {pair.an.flags.length
-                      ? <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>{pair.an.flags.map((f,i)=>(
-                          <span key={i} style={{background:"#3f1d1d", color:"#fca5a5", border:"1px solid #7f1d1d", padding:"4px 8px", borderRadius:999, fontSize:12}}>{f}</span>
-                        ))}</div>
-                      : <div style={{color:"#94a3b8"}}>No critical flags detected.</div>}
-                  </div>
-                </div>
-              </div>
-
-              {/* Stats */}
-              <div style={{display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginTop:16}}>
-                <Stat title="Price (USD)" value={pair.ds?.priceUsd ? `$${Number(pair.ds.priceUsd).toFixed(6)}` : "—"} />
-                <Stat title="Liquidity" value={euro(Number(pair.ds?.liquidity?.usd ?? 0))} />
-                <Stat title="Vol 24h" value={euro(Number(pair.ds?.volume?.h24 ?? 0))} />
-                <Stat title="Tx 24h" value={`${pair.ds?.txns24h?.buys ?? 0} buys / ${pair.ds?.txns24h?.sells ?? 0} sells`} />
-                <Stat title="Buyer Share" value={pair.ds?.buyerVsSeller?.buyRatio!=null ? pct(pair.ds.buyerVsSeller.buyRatio) : "—"} />
-                <Stat title="Pair Age" value={pair.ds?.pairCreatedAt ? new Date(pair.ds.pairCreatedAt).toLocaleDateString() : "—"} />
-                <Stat title="FDV/MC" value={euro(Number(pair.ds?.fdv ?? pair.ds?.marketCap ?? 0))} />
-                <a className="clean" style={btnLink} href={pair.ds?.url} target="_blank" rel="noreferrer">View on DEX</a>
-              </div>
-            </div>
-          </div>
-        )}
-        </div>
-
-        {/* Pricing */}
-        <div id="pricing" style={{maxWidth:1100, margin:"0 auto", padding:"16px"}}>
-          <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
-            <div style={{fontWeight:800, marginBottom:8}}>Upgrade • Unlock unlimited daily analyses</div>
-            <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12}}>
-              <PlanCard
-                name={PRICING.monthly.label} price={PRICING.monthly.price}
-                cta="Start Monthly"
-                href={buildCheckoutURL(STRIPE_MONTHLY, "monthly")}
-                note={`Your ref: ${myRef}`}
-              />
-              <PlanCard
-                name={PRICING.annual.label}  price={PRICING.annual.price}
-                cta="Start Annual"
-                href={buildCheckoutURL(STRIPE_ANNUAL, "annual")}
-                note={`Your ref: ${myRef}`}
-              />
-              <PlanCard
-                name={PRICING.lifetime.label} price={PRICING.lifetime.price}
-                cta="Buy Lifetime"
-                href={buildCheckoutURL(STRIPE_LIFE, "lifetime")}
-                note={`Your ref: ${myRef}`}
-              />
-            </div>
-            <div style={{fontSize:12, color:"#94a3b8", marginTop:8}}>
-              Prices intentionally sum to 8 (wealth alignment). Educational tool — not financial advice.
-            </div>
-          </div>
-        </div>
-      </>
-    );
-  }
-
-  function ScreenTerms() {
-    return (
-      <LegalShell title="Terms of Use">
-        <p><b>Educational Only.</b> Fortunex AI summarizes publicly available market data for learning purposes. It is <b>not</b> financial advice. You are responsible for your decisions.</p>
-        <p><b>No Warranties.</b> Data may be delayed, incomplete, or inaccurate. The service is provided “as is”.</p>
-        <p><b>Acceptable Use.</b> Don’t scrape, spam, abuse, or reverse-engineer the service. Don’t use outputs to mislead others.</p>
-        <p><b>Subscriptions.</b> Managed by our payment provider (e.g., Stripe). You can cancel anytime through that provider.</p>
-        <p><b>Refunds.</b> If a refund policy is offered, it will appear on the checkout page. Otherwise, purchases are final except where required by law.</p>
-        <p><b>Liability.</b> To the fullest extent permitted by law, we are not liable for any losses or damages arising from your use of the product.</p>
-        <p><b>Contact.</b> newsletter@fortunex.ai</p>
-      </LegalShell>
-    );
-  }
-
-  function ScreenPrivacy() {
-    return (
-      <LegalShell title="Privacy Policy">
-        <p><b>Data We Handle.</b> We process inputs you paste (links/addresses) to fetch public on-chain data. Settings and watchlist are stored in your browser (localStorage).</p>
-        <p><b>Accounts.</b> Our MVP does not require sign-in. Payment and subscription data are handled by our payment provider.</p>
-        <p><b>Analytics.</b> We may use privacy-friendly analytics to improve performance and stability.</p>
-        <p><b>Emails.</b> If you subscribe to our newsletter, your email is stored with our email provider and used only for updates and promotions. You can unsubscribe anytime.</p>
-        <p><b>Security.</b> We use modern hosting and HTTPS, but no system is perfectly secure.</p>
-        <p><b>Contact.</b> newsletter@fortunex.ai</p>
-      </LegalShell>
-    );
-  }
-
-  /* ---------- Layout ---------- */
   return (
     <div style={{minHeight:"100vh", background:"#0b1220", color:"#e5e7eb"}}>
       {/* Top Bar */}
@@ -519,12 +305,200 @@ Action: ${an.action.title} — ${an.action.detail}
           <a href="#/" style={{color:"#e5e7eb", textDecoration:"none", fontWeight:700}}>Home</a>
           <a href="#/terms" style={{color:"#e5e7eb", textDecoration:"none", fontWeight:700}}>Terms</a>
           <a href="#/privacy" style={{color:"#e5e7eb", textDecoration:"none", fontWeight:700}}>Privacy</a>
-          <a href="#/referrals" onClick={(e)=>{e.preventDefault(); window.location.hash="#/";}} style={{color:"#facc15", textDecoration:"none", fontWeight:700}}>Pricing</a>
+          <a href="#pricing" style={{color:"#facc15", textDecoration:"none", fontWeight:700}}>Pricing</a>
         </div>
       </div>
 
-      {/* Screens */}
-      {route==="/terms" ? <ScreenTerms/> : route==="/privacy" ? <ScreenPrivacy/> : <ScreenHome/>}
+      {/* Trial Banner */}
+      {routeHome && trialLeft>0 && (
+        <div style={{maxWidth:1100, margin:"0 auto 10px", padding:"10px 12px", border:"1px solid #f59e0b55", borderRadius:10, background:"#0a1a2f"}}>
+          <strong style={{color:"#fbbf24"}}>Trial:</strong> You have <strong>{trialLeft} day{trialLeft>1?"s":""}</strong> left. Full features—no card required.
+        </div>
+      )}
+
+      {/* Home */}
+      {routeHome && (
+        <>
+          {/* Input + Watchlist */}
+          <div style={{maxWidth:1100, margin:"0 auto", padding:"0 16px 16px"}}>
+            <div style={{display:"grid", gridTemplateColumns:"2fr 1fr", gap:16}}>
+              {/* Input */}
+              <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
+                <div style={{fontWeight:700, marginBottom:8}}>Paste DEX link / address / name</div>
+                <input
+                  placeholder="https://dexscreener.com/solana/xxxx or CA/name"
+                  value={q} onChange={(e)=>setQ(e.target.value)}
+                  style={{width:"100%", background:"#0a1220", color:"#e5e7eb", border:"1px solid #1f2a44", borderRadius:12, padding:"12px 14px", outline:"none"}}
+                />
+                <div style={{display:"flex", alignItems:"center", gap:12, marginTop:12}}>
+                  <button onClick={analyze} disabled={busy} style={btnGrad}>{busy?"Analyzing…":"Analyze"}</button>
+                  <Label>Free uses today: {Math.max(0, FREE_DAILY_CAP - used)} / {FREE_DAILY_CAP}</Label>
+                </div>
+                {err && <div style={{marginTop:10, color:"#f87171"}}>{err}</div>}
+              </div>
+
+              {/* Watchlist + Referrals */}
+              <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
+                <div style={{display:"flex", justifyContent:"space-between", alignItems:"center"}}>
+                  <div style={{fontWeight:800}}>Watchlist</div>
+                  {pair && <button onClick={addToWatch} style={btnSm}>+ Add current</button>}
+                </div>
+                <div style={{marginTop:10, display:"grid", gap:8}}>
+                  {watch.length===0 && <div style={{color:"#94a3b8"}}>No saved pairs yet.</div>}
+                  {watch.map((w,i)=>(
+                    <div key={w.url+i} style={{display:"flex", justifyContent:"space-between", alignItems:"center", background:"#0a1220", border:"1px solid #1f2a44", borderRadius:10, padding:"8px 10px"}}>
+                      <a href={w.url} target="_blank" rel="noreferrer" style={{textDecoration:"none", color:"#e5e7eb"}}>{w.symbol}</a>
+                      <button onClick={()=>removeFromWatch(w.url)} style={btnGhost}>Remove</button>
+                    </div>
+                  ))}
+                </div>
+                <div style={{marginTop:14, borderTop:"1px solid #1f2a44", paddingTop:12}}>
+                  <div style={{fontWeight:800, marginBottom:6}}>Invite & Earn</div>
+                  <div style={{fontSize:12, color:"#94a3b8"}}>Share your link — we append your code to Stripe as <code>client_reference_id</code>. Enable promo <b>REF8</b> in Stripe to auto-discount.</div>
+                  <div style={{display:"grid", gridTemplateColumns:"1fr auto", gap:8, marginTop:8}}>
+                    <input value={refLink} readOnly style={{background:"#0a1220", color:"#e5e7eb", border:"1px solid #1f2a44", borderRadius:10, padding:"8px 10px"}}/>
+                    <button onClick={()=>navigator.clipboard?.writeText(refLink)} style={btnSm}>Copy</button>
+                  </div>
+                  <div style={{fontSize:12, color:"#94a3b8", marginTop:6}}>
+                    Your code: <b>{myRef}</b> • Referred by: <b>{localStorage.getItem(LS_REFSRC) || "—"}</b>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* RESULT + PRINT AREA */}
+          <div ref={printRef}>
+          {pair && (
+            <div style={{maxWidth:1100, margin:"0 auto", padding:"0 16px 24px"}}>
+              <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
+                {/* Header */}
+                <div style={{display:"flex", alignItems:"center", gap:12, marginBottom:10, flexWrap:"wrap"}}>
+                  <div style={{width:28,height:28,borderRadius:999,background:"#1d4ed833",display:"grid",placeItems:"center"}}>👀</div>
+                  <div style={{fontWeight:800}}>{pair.ds?.baseToken?.symbol}/{pair.ds?.quoteToken?.symbol}</div>
+                  {pair && (
+                    <span style={{marginLeft:"auto",background:classifyBias(pair.an.raw).color+"22",color:classifyBias(pair.an.raw).color,border:`1px solid ${classifyBias(pair.an.raw).color}66`,padding:"3px 10px",borderRadius:999,fontWeight:700}}>
+                      {classifyBias(pair.an.raw).t} • Score: {Math.round(pair.an.raw)}/100
+                    </span>
+                  )}
+                  <span style={{background:"#0b1220",border:"1px solid #1f2937",borderRadius:999,padding:"3px 10px",fontWeight:700}}>
+                    Confidence: {Math.round(pair.an.confidence)}%
+                  </span>
+                </div>
+
+                {/* Bars */}
+                <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12}}>
+                  <MetricBar title="Stability" value={stabilityFrom(pair.ds)} />
+                  <MetricBar title="Growth" value={growthFrom(pair.ds)} />
+                  <MetricBar title="Momentum" value={momentumFrom(pair.ds)} />
+                </div>
+
+                {/* Why + Action + Flags */}
+                <div style={{display:"grid", gridTemplateColumns:"2fr 1fr", gap:14, marginTop:16}}>
+                  <div style={{background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:14}}>
+                    <div style={{fontWeight:800, marginBottom:6}}>Why this verdict?</div>
+                    <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:12}}>
+                      <ListCard title="Pros" color="#86efac" items={pair.an.pros} empty="No strong positives detected." />
+                      <ListCard title="Cons" color="#fca5a5" items={pair.an.cons} empty="No major red flags detected." />
+                    </div>
+                    <div style={{marginTop:10, padding:10, borderRadius:10, background:"#0b1220", border:"1px solid #1f2937", color:"#cbd5e1"}}>
+                      <strong>AI Insight:</strong> {pair.an.rationale}
+                      <div style={{fontSize:12, color:"#94a3b8", marginTop:6}}>Educational insights only — Not financial advice.</div>
+                    </div>
+                  </div>
+
+                  <div style={{display:"grid", gap:12}}>
+                    <div style={{background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:14}}>
+                      <div style={{fontWeight:800, marginBottom:6}}>Next Action</div>
+                      <div style={{fontWeight:900}}>{pair.an.action.title}</div>
+                      <div style={{color:"#cbd5e1", marginTop:4}}>{pair.an.action.detail}</div>
+                      <div style={{display:"flex", gap:8, marginTop:10, flexWrap:"wrap"}}>
+                        <button onClick={copySummary} style={btnSm}>Copy summary</button>
+                        <a className="clean" href={pair.an.url} target="_blank" rel="noreferrer" style={{...btnSm, textDecoration:"none"}}>Open on DEX</a>
+                        <button onClick={exportPDF} style={btnSm}>Export PDF</button>
+                      </div>
+                    </div>
+                    <div style={{background:"#0a1a2f", border:"1px solid #1f2a44", borderRadius:12, padding:14}}>
+                      <div style={{fontWeight:800, marginBottom:6}}>Risk Flags</div>
+                      {pair.an.flags.length
+                        ? <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>{pair.an.flags.map((f,i)=>(
+                            <span key={i} style={{background:"#3f1d1d", color:"#fca5a5", border:"1px solid #7f1d1d", padding:"4px 8px", borderRadius:999, fontSize:12}}>{f}</span>
+                          ))}</div>
+                        : <div style={{color:"#94a3b8"}}>No critical flags detected.</div>}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Stats */}
+                <div style={{display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, marginTop:16}}>
+                  <Stat title="Price (USD)" value={pair.ds?.priceUsd ? `$${Number(pair.ds.priceUsd).toFixed(6)}` : "—"} />
+                  <Stat title="Liquidity" value={euro(Number(pair.ds?.liquidity?.usd ?? 0))} />
+                  <Stat title="Vol 24h" value={euro(Number(pair.ds?.volume?.h24 ?? 0))} />
+                  <Stat title="Tx 24h" value={`${pair.ds?.txns24h?.buys ?? 0} buys / ${pair.ds?.txns24h?.sells ?? 0} sells`} />
+                  <Stat title="Buyer Share" value={pair.ds?.buyerVsSeller?.buyRatio!=null ? pct(pair.ds.buyerVsSeller.buyRatio) : "—"} />
+                  <Stat title="Pair Age" value={pair.ds?.pairCreatedAt ? new Date(pair.ds.pairCreatedAt).toLocaleDateString() : "—"} />
+                  <Stat title="FDV/MC" value={euro(Number(pair.ds?.fdv ?? pair.ds?.marketCap ?? 0))} />
+                  <a className="clean" style={btnLink} href={pair.ds?.url} target="_blank" rel="noreferrer">View on DEX</a>
+                </div>
+              </div>
+            </div>
+          )}
+          </div>
+
+          {/* Pricing */}
+          <div id="pricing" style={{maxWidth:1100, margin:"0 auto", padding:"16px"}}>
+            <div style={{background:"#0c162a", border:"1px solid #1f2a44", borderRadius:14, padding:18}}>
+              <div style={{fontWeight:800, marginBottom:8}}>Upgrade • Unlock unlimited analyses</div>
+              <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))", gap:12}}>
+                <PlanCard
+                  name={PRICING.monthly.label} price={PRICING.monthly.price}
+                  cta="Start Monthly"
+                  href={buildCheckoutURL(STRIPE_MONTHLY, "monthly")}
+                  note={`Your ref: ${myRef}`}
+                />
+                <PlanCard
+                  name={PRICING.annual.label}  price={PRICING.annual.price}
+                  cta="Start Annual"
+                  href={buildCheckoutURL(STRIPE_ANNUAL, "annual")}
+                  note={`Your ref: ${myRef}`}
+                />
+                <PlanCard
+                  name={PRICING.lifetime.label} price={PRICING.lifetime.price}
+                  cta="Buy Lifetime"
+                  href={buildCheckoutURL(STRIPE_LIFE, "lifetime")}
+                  note={`Your ref: ${myRef}`}
+                />
+              </div>
+              <div style={{fontSize:12, color:"#94a3b8", marginTop:8}}>
+                Educational tool — not financial advice.
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Terms / Privacy simple pages */}
+      {route==="/terms" && (
+        <LegalShell title="Terms of Use">
+          <p><b>Educational Only.</b> Fortunex AI summarizes publicly available market data for learning purposes. It is <b>not</b> financial advice. You are responsible for your decisions.</p>
+          <p><b>No Warranties.</b> Data may be delayed, incomplete, or inaccurate. The service is provided “as is”.</p>
+          <p><b>Acceptable Use.</b> Don’t scrape, spam, abuse, or reverse-engineer the service. Don’t use outputs to mislead others.</p>
+          <p><b>Subscriptions.</b> Managed by our payment provider (e.g., Stripe). You can cancel anytime through that provider.</p>
+          <p><b>Refunds.</b> If a refund policy is offered, it will appear on the checkout page. Otherwise, purchases are final except where required by law.</p>
+          <p><b>Liability.</b> To the fullest extent permitted by law, we are not liable for any losses or damages arising from your use of the product.</p>
+          <p><b>Contact.</b> newsletter@fortunex.ai</p>
+        </LegalShell>
+      )}
+      {route==="/privacy" && (
+        <LegalShell title="Privacy Policy">
+          <p><b>Data We Handle.</b> We process inputs you paste (links/addresses) to fetch public on-chain data. Settings and watchlist are stored in your browser (localStorage).</p>
+          <p><b>Accounts.</b> Our MVP does not require sign-in. Payment and subscription data are handled by our payment provider.</p>
+          <p><b>Analytics.</b> We may use privacy-friendly analytics to improve performance and stability.</p>
+          <p><b>Emails.</b> If you subscribe to our newsletter, your email is stored with our email provider and used only for updates and promotions. You can unsubscribe anytime.</p>
+          <p><b>Security.</b> We use modern hosting and HTTPS, but no system is perfectly secure.</p>
+          <p><b>Contact.</b> newsletter@fortunex.ai</p>
+        </LegalShell>
+      )}
 
       {/* Upgrade Modal */}
       {showUpgrade && (
@@ -535,12 +509,15 @@ Action: ${an.action.title} — ${an.action.detail}
               <button onClick={()=>setShowUpgrade(false)} style={{background:"transparent", color:"#e5e7eb", border:"none", fontSize:18}}>✕</button>
             </div>
             <div style={{marginTop:8, color:"#cbd5e1"}}>
-              You’ve used the free {FREE_DAILY_CAP} analyses for today.{trialLeft>0 ? ` You’re still in a ${TRIAL_DAYS}-day trial (${trialLeft} left).` : ""} Upgrade to continue instantly:
+              You’ve used the free {FREE_DAILY_CAP} analyses for today{trialLeft>0 ? ` (trial ${trialLeft} day${trialLeft>1?"s":""} left).` : "."} Upgrade to continue:
             </div>
-            <div style={{display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:12, marginTop:12}}>
+            <div style={{display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(220px, 1fr))", gap:12, marginTop:12}}>
               <PlanCard name={PRICING.monthly.label} price={PRICING.monthly.price} cta="Start Monthly" href={buildCheckoutURL(STRIPE_MONTHLY, "monthly")}/>
               <PlanCard name={PRICING.annual.label}  price={PRICING.annual.price}  cta="Start Annual"  href={buildCheckoutURL(STRIPE_ANNUAL, "annual")}/>
               <PlanCard name={PRICING.lifetime.label}price={PRICING.lifetime.price}cta="Buy Lifetime" href={buildCheckoutURL(STRIPE_LIFE, "lifetime")}/>
+            </div>
+            <div style={{fontSize:12, color:"#94a3b8", marginTop:8}}>
+              Educational tool — not financial advice.
             </div>
           </div>
         </div>
@@ -661,4 +638,4 @@ function momentumFrom(ds) {
   const h24 = Number(ds?.priceChange?.h24 ?? 0);
   let m = 5 + (h6/20) + (h24/20);
   return clamp(m, 0, 10);
-       }
+    }
