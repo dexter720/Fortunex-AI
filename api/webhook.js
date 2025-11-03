@@ -1,14 +1,16 @@
 // api/webhook.js
+// Fortunex AI backend endpoint for Stripe webhook verification
+
 const Stripe = require('stripe');
 const getRawBody = require('raw-body');
 
-/**
- * Vercel Node serverless function
- * Expects Stripe to POST events here.
- * Remember to set the env vars:
- *   STRIPE_SECRET_KEY       = sk_test_...
- *   STRIPE_WEBHOOK_SECRET   = whsec_...
- */
+// Disable automatic body parsing so we can verify the Stripe signature
+module.exports.config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     res.statusCode = 405;
@@ -16,54 +18,48 @@ module.exports = async (req, res) => {
   }
 
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  const sig = req.headers['stripe-signature'];
 
   let rawBody;
   try {
-    rawBody = await getRawBody(req); // must be raw, not parsed JSON
+    rawBody = await getRawBody(req);
   } catch (err) {
     res.statusCode = 400;
     return res.end(`Unable to read raw body: ${err.message}`);
   }
 
-  const signature = req.headers['stripe-signature'];
   let event;
   try {
-    event = stripe.webhooks.constructEvent(
-      rawBody,
-      signature,
-      process.env.STRIPE_WEBHOOK_SECRET
-    );
+    event = stripe.webhooks.constructEvent(rawBody, sig, endpointSecret);
   } catch (err) {
+    console.error('❌ Webhook signature verification failed:', err.message);
     res.statusCode = 400;
     return res.end(`Webhook Error: ${err.message}`);
   }
 
-  // 👇 Handle the events you care about
+  // ✅ Handle the events you care about
   try {
     switch (event.type) {
-      case 'checkout.session.completed': {
-        const session = event.data.object;
-        console.log('✅ checkout.session.completed', session.id);
-        // TODO: mark user as paid / grant access
+      case 'checkout.session.completed':
+        console.log('✅ Checkout session completed:', event.data.object.id);
         break;
-      }
-      case 'invoice.paid': {
-        const invoice = event.data.object;
-        console.log('✅ invoice.paid', invoice.id);
+
+      case 'invoice.payment_succeeded':
+        console.log('💰 Payment succeeded:', event.data.object.id);
         break;
-      }
-      case 'invoice.payment_succeeded': {
-        const invoice = event.data.object;
-        console.log('✅ invoice.payment_succeeded', invoice.id);
+
+      case 'customer.subscription.deleted':
+        console.log('🧾 Subscription canceled:', event.data.object.id);
         break;
-      }
+
       default:
-        console.log('ℹ️ Unhandled event type:', event.type);
+        console.log(`ℹ️ Unhandled event type: ${event.type}`);
     }
   } catch (err) {
     console.error('Handler error:', err);
     res.statusCode = 500;
-    return res.end('Handler failed');
+    return res.end('Webhook handler failed');
   }
 
   res.statusCode = 200;
