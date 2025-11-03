@@ -1,42 +1,72 @@
-import Stripe from 'stripe';
+// api/webhook.js
+const Stripe = require('stripe');
+const getRawBody = require('raw-body');
 
-export default async function handler(req, res) {
+/**
+ * Vercel Node serverless function
+ * Expects Stripe to POST events here.
+ * Remember to set the env vars:
+ *   STRIPE_SECRET_KEY       = sk_test_...
+ *   STRIPE_WEBHOOK_SECRET   = whsec_...
+ */
+module.exports = async (req, res) => {
   if (req.method !== 'POST') {
-    return res.status(405).send('Method not allowed');
+    res.statusCode = 405;
+    return res.end('Method not allowed');
   }
 
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
-  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
-  const sig = req.headers['stripe-signature'];
+  let rawBody;
+  try {
+    rawBody = await getRawBody(req); // must be raw, not parsed JSON
+  } catch (err) {
+    res.statusCode = 400;
+    return res.end(`Unable to read raw body: ${err.message}`);
+  }
 
+  const signature = req.headers['stripe-signature'];
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.rawBody, sig, endpointSecret);
+    event = stripe.webhooks.constructEvent(
+      rawBody,
+      signature,
+      process.env.STRIPE_WEBHOOK_SECRET
+    );
   } catch (err) {
-    console.error('Webhook signature verification failed:', err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
+    res.statusCode = 400;
+    return res.end(`Webhook Error: ${err.message}`);
   }
 
-  switch (event.type) {
-    case 'checkout.session.completed':
-      console.log('✅ Checkout session completed:', event.data.object.id);
-      break;
-    case 'invoice.payment_succeeded':
-      console.log('💰 Payment succeeded:', event.data.object.id);
-      break;
-    case 'customer.subscription.deleted':
-      console.log('🧾 Subscription canceled:', event.data.object.id);
-      break;
-    default:
-      console.log(`Unhandled event type: ${event.type}`);
+  // 👇 Handle the events you care about
+  try {
+    switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object;
+        console.log('✅ checkout.session.completed', session.id);
+        // TODO: mark user as paid / grant access
+        break;
+      }
+      case 'invoice.paid': {
+        const invoice = event.data.object;
+        console.log('✅ invoice.paid', invoice.id);
+        break;
+      }
+      case 'invoice.payment_succeeded': {
+        const invoice = event.data.object;
+        console.log('✅ invoice.payment_succeeded', invoice.id);
+        break;
+      }
+      default:
+        console.log('ℹ️ Unhandled event type:', event.type);
+    }
+  } catch (err) {
+    console.error('Handler error:', err);
+    res.statusCode = 500;
+    return res.end('Handler failed');
   }
 
-  res.json({ received: true });
-}
-
-export const config = {
-  api: {
-    bodyParser: false,
-  },
+  res.statusCode = 200;
+  res.setHeader('Content-Type', 'application/json');
+  return res.end(JSON.stringify({ received: true }));
 };
