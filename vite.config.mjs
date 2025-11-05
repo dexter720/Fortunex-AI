@@ -1,15 +1,12 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vite';
 
 export default defineConfig({
-  // Vite will only build your frontend; the /api folder is run by Vercel
   publicDir: 'public',
-  optimizeDeps: {
-    exclude: ['api'],
-  },
+  optimizeDeps: { exclude: ['api'] },
   build: {
     rollupOptions: {
-      external: [], // keep empty
-    },
+      external: []
+    }
   },
-  server: { port: 3000 },
-})
+  server: { port: 3000 }
+});
