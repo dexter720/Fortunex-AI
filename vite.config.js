@@ -1,6 +1,17 @@
 import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
 
 export default defineConfig({
-  plugins: [react()],
+  build: {
+    rollupOptions: {
+      external: [],
+    },
+  },
+  server: {
+    port: 3000,
+  },
+  // 👇 Ignore the API folder during build
+  publicDir: 'public',
+  optimizeDeps: {
+    exclude: ['api'],
+  },
 })
